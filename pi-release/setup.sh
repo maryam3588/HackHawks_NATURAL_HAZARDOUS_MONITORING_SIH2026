@@ -64,6 +64,21 @@ case "$MONGODB_URI" in
   *) LOCAL_DB=0 ;;
 esac
 
+# API key that ESP32s must send in the "x-api-key" header. Generated once, then kept.
+env_get() { { grep -E "^$1=" .env || true; } | tail -1 | cut -d= -f2- | tr -d '"'"'"' \r'; }
+API_KEY="$(env_get API_KEY)"
+if [ -z "$API_KEY" ]; then
+  API_KEY="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  printf '\n# Key ESP32s must send in the "x-api-key" header (keep it secret)\nAPI_KEY=%s\n' "$API_KEY" >> .env
+  ok "generated new API key (saved in .env)"
+else
+  ok "using existing API key from .env"
+fi
+# PUBLIC_TUNNEL=0 in .env turns off access from outside your Wi-Fi
+PUBLIC_TUNNEL="$(env_get PUBLIC_TUNNEL)"; PUBLIC_TUNNEL="${PUBLIC_TUNNEL:-1}"
+# Optional: token of a named Cloudflare tunnel -> permanent URL instead of a random one
+CF_TOKEN="$(env_get CLOUDFLARE_TUNNEL_TOKEN)"
+
 # Installs only the packages that are missing; apt-get update runs at most once
 APT_UPDATED=0
 apt_install() {
@@ -218,6 +233,73 @@ if [ "$UP" != "1" ]; then
   die "Dashboard didn't come up (logs above)."
 fi
 
+# ---------------------------------------------------------------- 6. public access (Cloudflare Tunnel)
+TUNNEL=hazard-tunnel
+PUBLIC_URL=""
+if [ "$PUBLIC_TUNNEL" = "1" ]; then
+  say "Checking public access (Cloudflare Tunnel)"
+  if command -v cloudflared >/dev/null 2>&1; then
+    ok "cloudflared already installed"
+  else
+    warn "installing cloudflared"
+    curl -fsSL -o /tmp/cloudflared.deb \
+      https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb
+    $SUDO dpkg -i /tmp/cloudflared.deb >/dev/null
+    rm -f /tmp/cloudflared.deb
+  fi
+  CF_BIN="$(command -v cloudflared)"
+
+  if [ -n "$CF_TOKEN" ]; then
+    # named tunnel: token kept in a root-only file, not in the world-readable unit
+    printf 'TUNNEL_TOKEN=%s\n' "$CF_TOKEN" | $SUDO tee /etc/$TUNNEL.env >/dev/null
+    $SUDO chmod 600 /etc/$TUNNEL.env
+    TUNNEL_EXEC="$CF_BIN tunnel --no-autoupdate run"
+    TUNNEL_ENVFILE="EnvironmentFile=/etc/$TUNNEL.env"
+  else
+    $SUDO rm -f /etc/$TUNNEL.env
+    TUNNEL_EXEC="$CF_BIN tunnel --no-autoupdate --url http://127.0.0.1:$PORT"
+    TUNNEL_ENVFILE=""
+  fi
+  $SUDO tee /etc/systemd/system/$TUNNEL.service >/dev/null <<EOF
+[Unit]
+Description=HackHawks public tunnel (Cloudflare)
+After=network-online.target $SERVICE.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+$TUNNEL_ENVFILE
+ExecStart=$TUNNEL_EXEC
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable $TUNNEL >/dev/null 2>&1
+  $SUDO systemctl restart $TUNNEL
+
+  if [ -n "$CF_TOKEN" ]; then
+    PUBLIC_URL="(the hostname you set for this tunnel in the Cloudflare dashboard)"
+    ok "named tunnel started"
+  else
+    for _ in $(seq 1 30); do
+      PUBLIC_URL="$(bash "$APP_DIR/tunnel-url.sh" 2>/dev/null || true)"
+      [ -n "$PUBLIC_URL" ] && break
+      sleep 1
+    done
+    if [ -n "$PUBLIC_URL" ]; then ok "public URL: $PUBLIC_URL"
+    else warn "tunnel started but no URL yet (needs internet) - run: bash tunnel-url.sh"; fi
+  fi
+else
+  if systemctl list-unit-files 2>/dev/null | grep -q "^$TUNNEL.service"; then
+    $SUDO systemctl disable --now $TUNNEL >/dev/null 2>&1 || true
+    ok "public tunnel turned off (PUBLIC_TUNNEL=0)"
+  fi
+fi
+
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 printf '\n\033[1;32m=====================================================\033[0m\n'
 printf '\033[1;32m  DONE - dashboard is running and starts on every boot\033[0m\n'
@@ -225,7 +307,16 @@ printf '\033[1;32m=====================================================\033[0m\n
 printf '  Open on any device on the same Wi-Fi:\n'
 printf '     http://%s:%s\n' "${IP:-<pi-ip>}" "$PORT"
 printf '     http://%s.local:%s\n\n' "$(hostname)" "$PORT"
+if [ -n "$PUBLIC_URL" ]; then
+  printf '  From ANYWHERE (internet):\n'
+  printf '     %s\n' "$PUBLIC_URL"
+  [ -z "$CF_TOKEN" ] && printf '     \033[1;33m(this random URL changes after every reboot - get the new one: bash tunnel-url.sh)\033[0m\n'
+  printf '\n'
+fi
 printf '  ESP32 nodes POST JSON to:\n'
-printf '     http://%s:%s/api/sensor-data\n\n' "${IP:-<pi-ip>}" "$PORT"
+printf '     http://%s:%s/api/sensor-data            (same Wi-Fi)\n' "${IP:-<pi-ip>}" "$PORT"
+[ -n "$PUBLIC_URL" ] && [ -z "$CF_TOKEN" ] && printf '     %s/api/sensor-data   (anywhere)\n' "$PUBLIC_URL"
+printf '  with header:\n'
+printf '     x-api-key: %s\n\n' "$API_KEY"
 printf '  Logs:     journalctl -u %s -f\n' "$SERVICE"
 printf '  Restart:  sudo systemctl restart %s\n\n' "$SERVICE"
