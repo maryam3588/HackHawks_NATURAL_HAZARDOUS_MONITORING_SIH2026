@@ -1,8 +1,9 @@
 """Live hazard inference for the Raspberry Pi.
 
-Keeps a rolling 6-hour history per (site, node) in memory, builds the same
+Keeps a rolling 3-day history per (site, node) in memory, builds the same
 features used in training, and returns calibrated probabilities with a
-SAFE / WATCH / WARNING level per hazard.
+SAFE / WATCH / WARNING level per hazard. A level is raised only after
+``ALERT_CONFIRM_READINGS`` consecutive readings over its threshold.
 
 Two ways to feed it readings:
 
@@ -86,6 +87,8 @@ class HazardPredictor:
                   file=sys.stderr)
 
         self.engine = StreamingFeatureEngine()
+        self.confirm = self.registry.get("alert_confirm_readings", C.ALERT_CONFIRM_READINGS)
+        self.streaks = {}  # (site, node, hazard) -> [readings >= WATCH, readings >= WARNING]
         self.lock = threading.Lock()
 
     def _check_versions(self):
@@ -102,9 +105,12 @@ class HazardPredictor:
 
     def predict(self, reading):
         reading = normalise_reading(reading)
+        site_id = str(reading.get("site_id", "default_site"))
         with self.lock:
             node_id, features = self.engine.update(reading)
+            return self._predict(node_id, site_id, reading, features)
 
+    def _predict(self, node_id, site_id, reading, features):
         hazards = {}
         for hazard, config in C.HAZARDS.items():
             if config["node_id"] != node_id:
@@ -123,9 +129,14 @@ class HazardPredictor:
             calibrator = artifact["calibrator"]
             probability = 1.0 / (1.0 + math.exp(-(calibrator["coef"] * raw + calibrator["intercept"])))
 
-            if probability >= artifact["warning_threshold"]:
+            # An alert needs `confirm` consecutive readings over the threshold,
+            # exactly as in training/evaluation (filters single noisy readings).
+            streak = self.streaks.setdefault((site_id, node_id, hazard), [0, 0])
+            streak[0] = streak[0] + 1 if probability >= artifact["watch_threshold"] else 0
+            streak[1] = streak[1] + 1 if probability >= artifact["warning_threshold"] else 0
+            if streak[1] >= self.confirm:
                 level = "WARNING"
-            elif probability >= artifact["watch_threshold"]:
+            elif streak[0] >= self.confirm:
                 level = "WATCH"
             else:
                 level = "SAFE"
@@ -142,7 +153,7 @@ class HazardPredictor:
 
         return {
             "node_id": node_id,
-            "site_id": str(reading.get("site_id", "default_site")),
+            "site_id": site_id,
             "timestamp": reading.get("timestamp"),
             "hazards": hazards,
             "data_source": C.DATA_SOURCE,

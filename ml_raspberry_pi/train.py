@@ -35,14 +35,16 @@ from features import feature_matrix, prepare_dataframe
 from metrics import (
     calculate_classification_metrics,
     print_classification_metrics,
-    select_ordered_thresholds,
+    score_events,
+    select_event_thresholds,
+    site_groups,
 )
 
 REQUIRED_COLUMNS = (
     ["timestamp", "node_id", "site_id", "sensor_status"]
     + C.RAW_SENSOR_COLUMNS
     + C.TARGET_COLUMNS
-    + ["dataset_role", "data_source"]
+    + ["dataset_role", "data_source", "event_subtype", "event_phase"]
 )
 
 
@@ -72,6 +74,10 @@ def load_dataset(data_dir, key):
 def hazard_xy(dataframe, config):
     subset = dataframe[dataframe["node_id"] == config["node_id"]]
     return feature_matrix(subset, config["features"]), subset[config["target"]].to_numpy(dtype=int)
+
+
+def hazard_groups(dataframe, config, hazard):
+    return site_groups(dataframe[dataframe["node_id"] == config["node_id"]], hazard)
 
 
 def count_episodes(dataframe, config):
@@ -175,7 +181,8 @@ def main():
                                     model_version=version, episodes=count_episodes(calibration_df, config)))
 
         thr_probabilities = apply_calibrator(calibrator, model.predict_proba(X_thr)[:, 1])
-        selection = select_ordered_thresholds(y_thr, thr_probabilities)
+        selection = select_event_thresholds(hazard_groups(threshold_df, config, hazard), thr_probabilities,
+                                            C.ALERT_CONFIRM_READINGS)
         if selection["status"] == "FAIL":
             print(f"{hazard.upper()} THRESHOLD SELECTION FAILED:", selection["reason"])
             acceptance_rows.append({"hazard": hazard, "candidate_status": "FAIL", "reason": selection["reason"]})
@@ -183,8 +190,10 @@ def main():
 
         watch_threshold = selection["watch_threshold"]
         warning_threshold = selection["warning_threshold"]
+        print(f"{hazard.upper()} thresholds: WATCH>={watch_threshold:.4f} WARNING>={warning_threshold:.4f} "
+              f"(validation WARNING: {selection['warning_validation']})")
         if watch_threshold == warning_threshold:
-            print(f"NOTE: {hazard} WATCH and WARNING thresholds are identical ({watch_threshold:.2f});"
+            print(f"NOTE: {hazard} WATCH and WARNING thresholds are identical;"
                   " the two alert tiers will always fire together.")
 
         for stage, threshold in [("WATCH", watch_threshold), ("WARNING", warning_threshold)]:
@@ -213,9 +222,13 @@ def main():
             episodes = count_episodes(test_df, config)
             probabilities = apply_calibrator(candidate["calibrator"], candidate["model"].predict_proba(X_test)[:, 1])
             results[hazard][test_name] = {"episodes": episodes}
+            groups = hazard_groups(test_df, config, hazard)
             for stage in ["WATCH", "WARNING"]:
                 threshold = candidate[f"{stage.lower()}_threshold"]
                 stage_metrics = calculate_classification_metrics(y_test, probabilities, threshold)
+                events = score_events(groups, probabilities, threshold, C.ALERT_CONFIRM_READINGS)
+                stage_metrics.update({f"event_{k}": v for k, v in events.items()})
+                print(f"{hazard.upper()} {test_name} {stage}: {events}")
                 print_classification_metrics(f"{hazard.upper()} {test_name.upper()} {stage} ({episodes} episodes)",
                                              stage_metrics)
                 results[hazard][test_name][stage] = stage_metrics
@@ -237,29 +250,39 @@ def main():
         res = results[hazard]
         normal_watch = res["locked_normal"]["WATCH"]
         normal_warning = res["locked_normal"]["WARNING"]
-        fault_recall_drop = normal_watch["recall"] - res["locked_faults"]["WATCH"]["recall"]
-        ood_recall_drop = normal_watch["recall"] - res["locked_ood"]["WATCH"]["recall"]
+        detection = {name: res[name]["WARNING"]["event_detection_rate"] for name in res}
+        fault_detection_drop = detection["locked_normal"] - detection["locked_faults"]
+        ood_detection_drop = detection["locked_normal"] - detection["locked_ood"]
         min_episodes = min(res[name]["episodes"] for name in res)
 
+        # Event-level gates decide PASS/FAIL. The per-reading Colab gates are
+        # kept as row_* columns for reference.
         gates = {
             "ordered_thresholds_pass": candidate["watch_threshold"] <= candidate["warning_threshold"],
-            "watch_recall_pass": normal_watch["recall"] >= C.WATCH_RECALL_TARGET,
-            "warning_precision_pass": normal_warning["precision"] >= C.WARNING_PRECISION_TARGET,
-            "pr_auc_pass": normal_watch["pr_auc"]
-            >= normal_watch["positive_rate_baseline"] + C.MIN_PR_AUC_MARGIN_ABOVE_BASELINE,
+            "detection_rate_pass": detection["locked_normal"] >= C.MIN_DETECTION_RATE,
+            "false_alarm_pass": normal_warning["event_false_alarms_per_site_day"]
+            <= C.MAX_FALSE_ALARMS_PER_SITE_DAY,
+            "alert_time_pass": normal_warning["event_alert_time_outside_events"]
+            <= C.MAX_ALERT_TIME_OUTSIDE_EVENTS,
+            "fault_robustness_pass": fault_detection_drop <= C.MAX_FAULT_DETECTION_DROP,
+            "ood_robustness_pass": ood_detection_drop <= C.MAX_OOD_DETECTION_DROP,
             "brier_score_pass": normal_watch["brier_score"] <= C.MAX_BRIER_SCORE,
             "ece_pass": normal_watch["ece"] <= C.MAX_ECE,
-            "fault_robustness_pass": fault_recall_drop <= C.MAX_FAULT_RECALL_DROP,
-            "ood_robustness_pass": ood_recall_drop <= C.MAX_OOD_RECALL_DROP,
         }
         gates = {name: bool(value) for name, value in gates.items()}
+        row_gates = {
+            "row_watch_recall_pass": bool(normal_watch["recall"] >= C.WATCH_RECALL_TARGET),
+            "row_warning_precision_pass": bool(normal_warning["precision"] >= C.WARNING_PRECISION_TARGET),
+            "row_pr_auc_pass": bool(normal_watch["pr_auc"]
+                                    >= normal_watch["positive_rate_baseline"] + C.MIN_PR_AUC_MARGIN_ABOVE_BASELINE),
+        }
         if min_episodes < C.MIN_TEST_EPISODES:
             status = "INSUFFICIENT_EVENTS"
         else:
             status = "PASS" if all(gates.values()) else "FAIL"
 
         print(f"\n{hazard.upper()} (fewest episodes in a locked test: {min_episodes})")
-        for name, value in gates.items():
+        for name, value in {**gates, **row_gates}.items():
             print(f"  {name}: {'PASS' if value else 'FAIL'}")
         print("  FINAL STATUS:", status)
 
@@ -270,16 +293,25 @@ def main():
             "min_test_episodes": min_episodes,
             "watch_threshold": candidate["watch_threshold"],
             "warning_threshold": candidate["warning_threshold"],
-            "normal_watch_precision": normal_watch["precision"],
-            "normal_watch_recall": normal_watch["recall"],
-            "normal_warning_precision": normal_warning["precision"],
-            "normal_warning_recall": normal_warning["recall"],
+            "normal_detection_rate": detection["locked_normal"],
+            "faults_detection_rate": detection["locked_faults"],
+            "ood_detection_rate": detection["locked_ood"],
+            "normal_warned_before_event": normal_warning["event_warned_before_event"],
+            "normal_median_lead_min": normal_warning["event_median_lead_min"],
+            "normal_false_alarms_per_site_day": normal_warning["event_false_alarms_per_site_day"],
+            "watch_false_alarms_per_site_day": normal_watch["event_false_alarms_per_site_day"],
+            "normal_alert_time_outside_events": normal_warning["event_alert_time_outside_events"],
+            "watch_alert_time_outside_events": normal_watch["event_alert_time_outside_events"],
+            "fault_detection_drop": fault_detection_drop,
+            "ood_detection_drop": ood_detection_drop,
+            "normal_row_watch_recall": normal_watch["recall"],
+            "normal_row_warning_precision": normal_warning["precision"],
+            "normal_row_warning_recall": normal_warning["recall"],
             "normal_pr_auc": normal_watch["pr_auc"],
             "normal_brier_score": normal_watch["brier_score"],
             "normal_ece": normal_watch["ece"],
-            "fault_recall_drop": fault_recall_drop,
-            "ood_recall_drop": ood_recall_drop,
             **gates,
+            **row_gates,
         })
 
         joblib.dump({
@@ -320,6 +352,7 @@ def main():
             "models": registry,
             "data_source": C.DATA_SOURCE,
             "sklearn_version": sklearn.__version__,
+            "alert_confirm_readings": C.ALERT_CONFIRM_READINGS,
             "numpy_version": np.__version__,
             "python_version": platform.python_version(),
             "machine": platform.machine(),
@@ -331,14 +364,18 @@ def main():
     print("=" * 90)
     order = {hazard: index for index, hazard in enumerate(C.HAZARDS)}
     for row in sorted(acceptance_rows, key=lambda r: order[r["hazard"]]):
-        if "normal_watch_recall" not in row:
+        if "normal_detection_rate" not in row:
             print(f"{row['hazard'].upper()} | STATUS={row['candidate_status']} | {row.get('reason', '')}")
             continue
         print(
             f"{row['hazard'].upper()} | STATUS={row['candidate_status']} | episodes>={row['min_test_episodes']} | "
-            f"WATCH>={row['watch_threshold']:.2f} recall={row['normal_watch_recall']:.4f} | "
-            f"WARNING>={row['warning_threshold']:.2f} precision={row['normal_warning_precision']:.4f} | "
-            f"fault drop={row['fault_recall_drop']:.4f} | OOD drop={row['ood_recall_drop']:.4f}"
+            f"WARNING>={row['warning_threshold']:.4f}: detected {row['normal_detection_rate']:.0%} "
+            f"(faults {row['faults_detection_rate']:.0%}, OOD {row['ood_detection_rate']:.0%}), "
+            f"before event {row['normal_warned_before_event']:.0%}, lead {row['normal_median_lead_min']:.0f} min, "
+            f"false alarms {row['normal_false_alarms_per_site_day']:.3f}/site-day, "
+            f"alert {row['normal_alert_time_outside_events']:.2%} of normal time | "
+            f"WATCH>={row['watch_threshold']:.4f}: false alarms {row['watch_false_alarms_per_site_day']:.2f}/site-day, "
+            f"alert {row['watch_alert_time_outside_events']:.2%}"
         )
 
     print(f"\nModels:  {model_dir}")

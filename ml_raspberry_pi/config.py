@@ -19,9 +19,25 @@ MODEL_VERSION = "v4"
 SAMPLE_INTERVAL_MINUTES = 5
 RANDOM_SEED = 42
 
-# Alert threshold selection targets (unchanged from the Colab pipeline)
+# Per-reading targets from the Colab pipeline. Still reported, but no longer
+# used to pick thresholds: with honest "within 15 min" labels they count an
+# alert 45 minutes early as a false positive.
 WATCH_RECALL_TARGET = 0.90
 WARNING_PRECISION_TARGET = 0.70
+
+# Event-level threshold selection (on the threshold-validation set):
+# the most sensitive threshold that stays within a false-alarm budget.
+WARNING_MAX_FALSE_ALARMS = 0.2   # per site per day, i.e. about one false WARNING per site every 5 days
+WATCH_MAX_FALSE_ALARMS = 1.0
+WARNING_MAX_ALERT_TIME = 0.01    # share of non-event time spent in WARNING
+WATCH_MAX_ALERT_TIME = 0.05
+
+# Event-level acceptance gates (on locked tests, WARNING level)
+MIN_DETECTION_RATE = 0.90
+MAX_FALSE_ALARMS_PER_SITE_DAY = 0.5
+MAX_ALERT_TIME_OUTSIDE_EVENTS = 0.02
+MAX_FAULT_DETECTION_DROP = 0.15
+MAX_OOD_DETECTION_DROP = 0.20
 
 # Acceptance gates
 MAX_ECE = 0.15
@@ -33,6 +49,9 @@ MAX_OOD_RECALL_DROP = 0.20
 # A locked test with fewer disaster episodes than this cannot support a
 # PASS/FAIL verdict; the hazard is reported as INSUFFICIENT_EVENTS instead.
 MIN_TEST_EPISODES = 20
+
+# Live alerts need this many consecutive readings over the threshold
+ALERT_CONFIRM_READINGS = 2
 
 # Hot-day threshold used by hot_window_fraction_1h
 HOT_TEMPERATURE_C = 38.0
@@ -85,6 +104,7 @@ COMMON_FEATURES = [
 
 FLOOD_FEATURES = COMMON_FEATURES + [
     "water_level_cm",
+    "water_level_comp_cm",
     "rainfall_mm_h",
     "soil_moisture_pct",
     "temperature_c",
@@ -93,8 +113,13 @@ FLOOD_FEATURES = COMMON_FEATURES + [
     "water_level_lag_3",
     "water_level_change_1",
     "water_level_change_3",
+    "water_comp_change_1h",
+    "water_comp_median_15min",
+    "water_comp_std_1h",
+    "water_level_anomaly_cm",
     "rainfall_15min_sum",
     "rainfall_1h_sum",
+    "rainfall_3h_sum",
     "water_level_15min_mean",
     "water_level_1h_mean",
     "node1_flood_score",
@@ -108,11 +133,17 @@ LANDSLIDE_FEATURES = COMMON_FEATURES + [
     "tilt_y_deg",
     "tilt_magnitude_deg",
     "acceleration_g",
+    "acceleration_1h_max",
     "soil_moisture_lag_1",
     "soil_moisture_change_1",
+    "soil_moisture_change_1h",
+    "soil_moisture_anomaly",
     "rainfall_1h_sum",
+    "rainfall_3h_sum",
     "tilt_change_1",
     "tilt_change_3",
+    "tilt_change_1h",
+    "tilt_anomaly_deg",
     "node1_landslide_score",
     "node1_landslide_label",
 ]
@@ -133,6 +164,12 @@ WILDFIRE_FEATURES = COMMON_FEATURES + [
     "gas_change_1",
     "smoke_15min_mean",
     "gas_15min_mean",
+    "smoke_median_15min",
+    "gas_median_15min",
+    "smoke_ratio_24h",
+    "gas_ratio_24h",
+    "smoke_change_1h",
+    "temperature_anomaly_24h",
     "node2_wildfire_score",
     "node2_wildfire_label",
 ]
@@ -148,6 +185,13 @@ EXTREME_HEAT_FEATURES = COMMON_FEATURES + [
     "temperature_3h_mean",
     "temperature_6h_mean",
     "temperature_6h_max",
+    "temperature_24h_mean",
+    "temperature_anomaly_24h",
+    "temperature_anomaly_72h",
+    "temperature_1h_std",
+    "temperature_change_24h",
+    "humidity_1h_mean",
+    "humidity_change_24h",
     "hot_window_fraction_1h",
     "node2_extreme_heat_score",
     "node2_extreme_heat_label",
@@ -192,7 +236,15 @@ WINDOW_15MIN = 4
 WINDOW_1H = 12
 WINDOW_3H = 36
 WINDOW_6H = 72
-HISTORY_LENGTH = WINDOW_6H  # longest window the live engine must remember
+WINDOW_24H = 288
+WINDOW_72H = 864
+HISTORY_LENGTH = WINDOW_72H  # longest window the live engine must remember
+
+# Water-level node geometry, used for speed-of-sound compensation. Set these
+# to the real installation: transducer height above the channel bed, and the
+# air temperature the firmware assumes for the speed of sound.
+ULTRASONIC_MOUNT_HEIGHT_CM = 300.0
+ULTRASONIC_ASSUMED_AIR_C = 20.0
 
 # Accept the Node.js dashboard's node ids as aliases
 NODE_ALIASES = {

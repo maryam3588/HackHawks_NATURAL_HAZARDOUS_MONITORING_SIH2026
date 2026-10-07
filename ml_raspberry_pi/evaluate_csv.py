@@ -17,7 +17,13 @@ import pandas as pd
 
 import config as C
 from features import feature_matrix, prepare_dataframe
-from metrics import calculate_classification_metrics, print_classification_metrics
+from metrics import (
+    calculate_classification_metrics,
+    confirm_alerts,
+    print_classification_metrics,
+    score_events,
+    site_groups,
+)
 from train import apply_calibrator
 
 
@@ -65,14 +71,20 @@ def main():
             artifact["model"].predict_proba(feature_matrix(subset, artifact["features"]))[:, 1],
         )
         watch, warning = artifact["watch_threshold"], artifact["warning_threshold"]
-        print(f"WATCH threshold: {watch:.2f}   WARNING threshold: {warning:.2f}")
+        print(f"WATCH threshold: {watch:.4f}   WARNING threshold: {warning:.4f}   "
+              f"confirm readings: {C.ALERT_CONFIRM_READINGS}")
+
+        # Alert levels exactly as the live service raises them
+        watch_alert = np.zeros(len(subset), dtype=bool)
+        warning_alert = np.zeros(len(subset), dtype=bool)
+        for _, index in subset.groupby("site_id").indices.items():
+            watch_alert[index] = confirm_alerts(probabilities[index] >= watch, C.ALERT_CONFIRM_READINGS)
+            warning_alert[index] = confirm_alerts(probabilities[index] >= warning, C.ALERT_CONFIRM_READINGS)
 
         if config["target"] not in labelled_targets:
             output = subset[["timestamp", "site_id", "node_id"]].copy()
             output[f"{hazard}_probability"] = probabilities
-            output[f"{hazard}_level"] = np.where(
-                probabilities >= warning, "WARNING", np.where(probabilities >= watch, "WATCH", "SAFE")
-            )
+            output[f"{hazard}_level"] = np.where(warning_alert, "WARNING", np.where(watch_alert, "WATCH", "SAFE"))
             path = args.out / f"{hazard}_predictions.csv"
             output.to_csv(path, index=False)
             print(f"No labels in CSV - predictions saved to {path}")
@@ -85,14 +97,29 @@ def main():
         print_classification_metrics("WATCH", watch_metrics)
         print_classification_metrics("WARNING", warning_metrics)
 
-        gates = {
-            "watch_recall_pass": watch_metrics["recall"] >= C.WATCH_RECALL_TARGET,
-            "warning_precision_pass": warning_metrics["precision"] >= C.WARNING_PRECISION_TARGET,
-            "pr_auc_pass": bool(watch_metrics["pr_auc"]
-                                >= watch_metrics["positive_rate_baseline"] + C.MIN_PR_AUC_MARGIN_ABOVE_BASELINE),
-            "brier_pass": watch_metrics["brier_score"] <= C.MAX_BRIER_SCORE,
-            "ece_pass": watch_metrics["ece"] <= C.MAX_ECE,
-        }
+        events = {}
+        if {"event_subtype", "event_phase"} <= set(subset.columns):
+            # Simulator-style CSV: score whole disasters, as train.py does
+            events = score_events(site_groups(subset, hazard), probabilities, warning, C.ALERT_CONFIRM_READINGS)
+            print("EVENTS (WARNING):", {k: round(v, 4) for k, v in events.items()})
+            gates = {
+                "detection_rate_pass": events["detection_rate"] >= C.MIN_DETECTION_RATE,
+                "false_alarm_pass": events["false_alarms_per_site_day"] <= C.MAX_FALSE_ALARMS_PER_SITE_DAY,
+                "alert_time_pass": events["alert_time_outside_events"] <= C.MAX_ALERT_TIME_OUTSIDE_EVENTS,
+                "brier_pass": watch_metrics["brier_score"] <= C.MAX_BRIER_SCORE,
+                "ece_pass": watch_metrics["ece"] <= C.MAX_ECE,
+            }
+        else:
+            # Only labels: fall back to per-reading gates
+            gates = {
+                "watch_recall_pass": watch_metrics["recall"] >= C.WATCH_RECALL_TARGET,
+                "warning_precision_pass": warning_metrics["precision"] >= C.WARNING_PRECISION_TARGET,
+                "pr_auc_pass": bool(watch_metrics["pr_auc"]
+                                    >= watch_metrics["positive_rate_baseline"] + C.MIN_PR_AUC_MARGIN_ABOVE_BASELINE),
+                "brier_pass": watch_metrics["brier_score"] <= C.MAX_BRIER_SCORE,
+                "ece_pass": watch_metrics["ece"] <= C.MAX_ECE,
+            }
+        gates = {name: bool(value) for name, value in gates.items()}
         status = "PASS" if all(gates.values()) else "FAIL"
         print("GATES:", {k: "PASS" if v else "FAIL" for k, v in gates.items()}, "->", status)
 
@@ -103,6 +130,7 @@ def main():
             "warning_threshold": warning,
             **{f"watch_{k}": v for k, v in watch_metrics.items()},
             **{f"warning_{k}": warning_metrics[k] for k in ["precision", "recall", "f1"]},
+            **{f"event_{k}": v for k, v in events.items()},
             **gates,
         })
 
@@ -110,7 +138,9 @@ def main():
     path = args.out / "external_test_results.csv"
     results_df.to_csv(path, index=False)
     print("\nSUMMARY")
-    print(results_df[[c for c in ["hazard", "status", "watch_recall", "warning_precision"] if c in results_df]].to_string(index=False))
+    columns = ["hazard", "status", "event_detection_rate", "event_false_alarms_per_site_day",
+               "watch_recall", "warning_precision"]
+    print(results_df[[c for c in columns if c in results_df]].to_string(index=False))
     print("\nSaved:", path)
 
 

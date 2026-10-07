@@ -1,0 +1,8 @@
+# For running the PRE-TRAINED models shipped in output/models/ on the Pi.
+# Pickled scikit-learn models need the exact version that trained them.
+# numpy only needs to be 2.x: tested identical predictions with numpy 2.4.6
+# (the newest with Raspberry Pi OS Bookworm / Python 3.11 ARM wheels) and 2.5.3.
+scikit-learn==1.9.1
+numpy>=2.0
+pandas>=2.0
+joblib>=1.3

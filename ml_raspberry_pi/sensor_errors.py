@@ -34,6 +34,8 @@ listed in ``HARDWARE``; edit them to match your nodes.
 import numpy as np
 import pandas as pd
 
+import config as C
+
 STEP_MINUTES = 5
 STEPS_PER_DAY = 24 * 60 // STEP_MINUTES
 
@@ -69,10 +71,10 @@ TINYML_COLUMNS = {
     "node2": ["node2_wildfire_score", "node2_extreme_heat_score", "node2_wildfire_label", "node2_extreme_heat_label"],
 }
 
-ULTRASONIC_MOUNT_HEIGHT_CM = 300.0   # transducer height above the channel bed
+ULTRASONIC_MOUNT_HEIGHT_CM = C.ULTRASONIC_MOUNT_HEIGHT_CM
 ULTRASONIC_BLIND_ZONE_CM = 25.0
 ULTRASONIC_MAX_RANGE_CM = 450.0
-ULTRASONIC_ASSUMED_AIR_C = 20.0      # firmware uses a fixed speed of sound
+ULTRASONIC_ASSUMED_AIR_C = C.ULTRASONIC_ASSUMED_AIR_C   # firmware uses a fixed speed of sound
 RAIN_MM_PER_TIP = 0.2
 ADC_MAX = 4095
 ADC_KNEE = 3100                      # ESP32 ADC flattens above ~2.5 V
