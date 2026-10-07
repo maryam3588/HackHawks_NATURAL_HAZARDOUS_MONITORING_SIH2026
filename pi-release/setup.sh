@@ -210,7 +210,7 @@ $SUDO systemctl restart $SERVICE
 
 UP=0
 for _ in $(seq 1 30); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/dashboard"; then UP=1; break; fi
+  if curl -fs -o /dev/null "http://127.0.0.1:$PORT/dashboard"; then UP=1; break; fi
   sleep 1
 done
 if [ "$UP" != "1" ]; then
