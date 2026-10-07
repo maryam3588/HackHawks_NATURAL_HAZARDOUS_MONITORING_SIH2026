@@ -1,0 +1,6 @@
+# Raspberry Pi OS 64-bit (Bookworm, Python 3.11) gets prebuilt aarch64 wheels
+# from PyPI; 32-bit Pi OS gets them from piwheels.org (preconfigured).
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.3
+joblib>=1.3

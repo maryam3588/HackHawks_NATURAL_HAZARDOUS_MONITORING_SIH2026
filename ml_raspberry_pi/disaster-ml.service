@@ -1,0 +1,21 @@
+# systemd unit: runs the inference server at boot.
+# Install (adjust User and paths if you did not unzip to /home/pi/ml_raspberry_pi):
+#   sudo cp disaster-ml.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now disaster-ml
+#   journalctl -u disaster-ml -f
+[Unit]
+Description=Disaster hazard ML inference (flood, landslide, wildfire, extreme heat)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/ml_raspberry_pi
+Environment=OMP_NUM_THREADS=1
+ExecStart=/home/pi/ml_raspberry_pi/.venv/bin/python3 live_inference.py serve --host 127.0.0.1 --port 5001
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
