@@ -1,0 +1,1071 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Environmental Monitoring Dashboard</title>
+  <script src="/vendor/chart.js/chart.umd.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    /* HEADER */
+    .header {
+      background: white;
+      padding: 30px;
+      border-radius: 10px;
+      margin-bottom: 30px;
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .header h1 {
+      color: #333;
+      font-size: 28px;
+    }
+
+    .header p {
+      color: #666;
+      font-size: 14px;
+      margin-top: 5px;
+    }
+
+    .header-buttons {
+      display: flex;
+      gap: 10px;
+    }
+
+    /* ALARM BADGE */
+    .alarm-badge {
+      position: relative;
+      padding: 10px 15px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: transform 0.2s;
+    }
+
+    .alarm-badge:hover {
+      transform: translateY(-2px);
+    }
+
+    .badge-count {
+      position: absolute;
+      top: -8px;
+      right: -8px;
+      background: #ff4757;
+      color: white;
+      border-radius: 50%;
+      width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 12px;
+    }
+
+    /* ALERT ALARM (Full screen when triggered) */
+    .alert-alarm {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.8);
+      z-index: 1000;
+      justify-content: center;
+      align-items: center;
+      animation: pulse 0.5s infinite;
+    }
+
+    .alert-alarm.show {
+      display: flex;
+    }
+
+    .alert-alarm-content {
+      background: white;
+      padding: 60px;
+      border-radius: 20px;
+      text-align: center;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      max-width: 600px;
+    }
+
+    .alert-alarm-icon {
+      font-size: 80px;
+      margin-bottom: 20px;
+      animation: bounce 0.5s infinite;
+    }
+
+    .alert-alarm-title {
+      font-size: 36px;
+      color: #ff4757;
+      margin-bottom: 15px;
+      font-weight: bold;
+    }
+
+    .alert-alarm-message {
+      font-size: 18px;
+      color: #333;
+      margin-bottom: 30px;
+    }
+
+    .alert-alarm-severity {
+      font-size: 16px;
+      padding: 15px;
+      background: #ffe5e5;
+      border-radius: 10px;
+      margin-bottom: 20px;
+      font-weight: bold;
+      color: #ff4757;
+    }
+
+    .alert-alarm-close {
+      padding: 12px 30px;
+      background: #667eea;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.7;
+      }
+    }
+
+    @keyframes bounce {
+
+      0%,
+      100% {
+        transform: scale(1);
+      }
+
+      50% {
+        transform: scale(1.1);
+      }
+    }
+
+    /* ALERTS PANEL (Collapsible) */
+    .alerts-panel {
+      background: white;
+      padding: 0;
+      border-radius: 10px;
+      margin-bottom: 30px;
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease;
+    }
+
+    .alerts-panel.expanded {
+      max-height: 500px;
+      padding: 20px;
+    }
+
+    .alerts-panel h3 {
+      margin-bottom: 15px;
+      color: #333;
+    }
+
+    .alert-item {
+      background: #f8f9fa;
+      padding: 12px;
+      border-left: 4px solid #ffc107;
+      margin-bottom: 10px;
+      border-radius: 5px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .alert-item.critical {
+      border-left-color: #ff4757;
+      background: #ffe5e5;
+    }
+
+    .alert-item.high {
+      border-left-color: #ff8800;
+      background: #fff3e0;
+    }
+
+    .alert-item.medium {
+      border-left-color: #ffc107;
+      background: #fffde7;
+    }
+
+    .alert-time {
+      font-size: 12px;
+      color: #666;
+    }
+
+    .alert-close {
+      cursor: pointer;
+      color: #999;
+      font-weight: bold;
+    }
+
+    /* RISK SUMMARY (Above Nodes) */
+    .risk-summary {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 15px;
+      margin-bottom: 30px;
+    }
+
+    /* RISK CARDS - EXACT DESIGN */
+    .risk-card {
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+      background: white;
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 280px;
+      border: 3px solid transparent;
+      transition: all 0.3s;
+    }
+
+    .risk-card:hover {
+      box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+      transform: translateY(-2px);
+    }
+
+    .risk-card.low {
+      border-color: #26de81;
+    }
+
+    .risk-card.medium {
+      border-color: #ffc107;
+    }
+
+    .risk-card.high {
+      border-color: #ff8800;
+    }
+
+    .risk-card.critical {
+      border-color: #ff4757;
+    }
+
+    .risk-icon {
+      font-size: 48px;
+      margin-bottom: 12px;
+    }
+
+    .risk-label {
+      font-size: 14px;
+      color: #333;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+
+    .risk-percentage {
+      font-size: 52px;
+      font-weight: 900;
+      color: #ffc107;
+      margin-bottom: 12px;
+    }
+
+    .risk-card.low .risk-percentage {
+      color: #26de81;
+    }
+
+    .risk-card.high .risk-percentage {
+      color: #ff8800;
+    }
+
+    .risk-card.critical .risk-percentage {
+      color: #ff4757;
+    }
+
+    .risk-badge {
+      display: inline-block;
+      padding: 8px 18px;
+      border-radius: 25px;
+      font-size: 12px;
+      font-weight: 700;
+      color: white;
+      margin-bottom: 15px;
+      letter-spacing: 0.5px;
+    }
+
+    .risk-card.low .risk-badge {
+      background: #26de81;
+    }
+
+    .risk-card.medium .risk-badge {
+      background: #ffc107;
+    }
+
+    .risk-card.high .risk-badge {
+      background: #ff8800;
+    }
+
+    .risk-card.critical .risk-badge {
+      background: #ff4757;
+    }
+
+    .risk-alert-box {
+      background: #f0f0f0;
+      color: #666;
+      padding: 12px;
+      border-radius: 8px;
+      margin-top: auto;
+      width: 100%;
+      text-align: center;
+      font-size: 11px;
+      line-height: 1.5;
+      font-weight: 500;
+    }
+
+    .risk-card.medium .risk-alert-box {
+      background: #ffe5cc;
+      color: #ff8800;
+    }
+
+    .risk-card.high .risk-alert-box {
+      background: #ffe5cc;
+      color: #ff8800;
+    }
+
+    .risk-card.critical .risk-alert-box {
+      background: #ffe5e5;
+      color: #ff4757;
+    }
+
+    .risk-alert-label {
+      display: block;
+      font-weight: 700;
+      margin-bottom: 4px;
+      font-size: 12px;
+    }
+
+    .risk-alert-message {
+      display: block;
+      font-size: 11px;
+      margin-bottom: 3px;
+    }
+
+    .risk-alert-time {
+      display: block;
+      font-size: 10px;
+      opacity: 0.8;
+    }
+
+
+    /* NODES GRID */
+    .nodes {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+
+    .node-card {
+      background: white;
+      padding: 25px;
+      border-radius: 10px;
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+      border-left: 5px solid #667eea;
+    }
+
+    .node-card.node2 {
+      border-left-color: #ff6b6b;
+    }
+
+    .node-title {
+      font-size: 18px;
+      font-weight: bold;
+      margin-bottom: 20px;
+      color: #333;
+    }
+
+    .sensor-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid #eee;
+      color: #555;
+    }
+
+    .sensor-row:last-of-type {
+      border-bottom: none;
+    }
+
+    .sensor-label {
+      font-weight: 500;
+    }
+
+    .sensor-value {
+      color: #333;
+      font-weight: 600;
+    }
+
+
+    /* CHARTS */
+    .charts-section {
+      background: white;
+      padding: 25px;
+      border-radius: 10px;
+      margin-bottom: 30px;
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+    }
+
+    .charts-section h3 {
+      color: #333;
+      margin-bottom: 20px;
+    }
+
+    .charts-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    .chart-container {
+      position: relative;
+      height: 300px;
+    }
+
+    /* CONTROLS */
+    .controls {
+      background: white;
+      padding: 25px;
+      border-radius: 10px;
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+      margin-bottom: 30px;
+    }
+
+    .controls h3 {
+      color: #333;
+      margin-bottom: 15px;
+    }
+
+    .button-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    button {
+      padding: 10px 15px;
+      cursor: pointer;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 5px;
+      font-weight: 500;
+      transition: transform 0.2s;
+      font-size: 13px;
+    }
+
+    button:hover {
+      transform: translateY(-2px);
+    }
+
+    button.danger {
+      background: linear-gradient(135deg, #ff4757 0%, #ff6348 100%);
+    }
+
+    button.success {
+      background: linear-gradient(135deg, #2ed573 0%, #26de81 100%);
+    }
+
+    .divider {
+      margin: 20px 0;
+      border-top: 1px solid #ddd;
+    }
+
+    .simulator-status {
+      display: inline-block;
+      margin-left: 10px;
+      padding: 5px 10px;
+      background: #e0e0e0;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+
+    .simulator-status.running {
+      background: #c8e6c9;
+      color: #2e7d32;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <!-- HEADER -->
+    <div class="header">
+      <div>
+        <h1>🌍 Environmental Intelligence Network</h1>
+        <p>● <span id="node-count">2</span> Nodes Online <span class="simulator-status" id="sim-status">Offline</span>
+        </p>
+      </div>
+      <div class="header-buttons">
+        <button class="alarm-badge" onclick="toggleAlerts()">
+          🚨 Alerts
+          <span class="badge-count" id="alert-count" style="display: none;">0</span>
+        </button>
+        <button style="background: linear-gradient(135deg, #45b7d1 0%, #2196F3 100%);"
+          onclick="checkDatabaseStatus()">📊 DB Status</button>
+      </div>
+    </div>
+
+    <!-- ALARM OVERLAY (Hidden until HIGH/CRITICAL) -->
+    <div class="alert-alarm" id="alarm-overlay">
+      <div class="alert-alarm-content">
+        <div class="alert-alarm-icon" id="alarm-icon">🚨</div>
+        <div class="alert-alarm-title" id="alarm-title">ALERT</div>
+        <div class="alert-alarm-severity" id="alarm-severity">HIGH RISK</div>
+        <div class="alert-alarm-message" id="alarm-message">A critical hazard has been detected</div>
+        <button class="alert-alarm-close" onclick="closeAlarm()">Acknowledge</button>
+      </div>
+    </div>
+
+    <!-- ALERTS PANEL (Collapsible) -->
+    <div class="alerts-panel" id="alerts-panel">
+      <h3>🚨 Active Alerts</h3>
+      <div id="alerts-container">
+        <p style="color: #999; text-align: center; padding: 20px;">No active alerts</p>
+      </div>
+    </div>
+
+    <!-- RISK SUMMARY (Above Nodes) -->
+    <div class="risk-summary">
+      <div id="node1-flood-risk" class="risk-card low">
+        <div class="risk-icon">🌊</div>
+        <div class="risk-label">Flood Risk</div>
+        <div class="risk-percentage" id="node1-flood-score">--%</div>
+        <div class="risk-badge" id="node1-flood-badge">LOW</div>
+        <div class="risk-alert-box" id="node1-flood-alert">
+          <span class="risk-alert-label" id="node1-flood-alert-label">No alert</span>
+          <span class="risk-alert-message" id="node1-flood-alert-msg"></span>
+          <span class="risk-alert-time" id="node1-flood-alert-time"></span>
+        </div>
+      </div>
+
+      <div id="node1-landslide-risk" class="risk-card low">
+        <div class="risk-icon">🪨</div>
+        <div class="risk-label">Landslide Risk</div>
+        <div class="risk-percentage" id="node1-landslide-score">--%</div>
+        <div class="risk-badge" id="node1-landslide-badge">LOW</div>
+        <div class="risk-alert-box" id="node1-landslide-alert">
+          <span class="risk-alert-label" id="node1-landslide-alert-label">No alert</span>
+          <span class="risk-alert-message" id="node1-landslide-alert-msg"></span>
+          <span class="risk-alert-time" id="node1-landslide-alert-time"></span>
+        </div>
+      </div>
+
+      <div id="node2-fire-risk" class="risk-card low">
+        <div class="risk-icon">🔥</div>
+        <div class="risk-label">Fire Risk</div>
+        <div class="risk-percentage" id="node2-fire-score">--%</div>
+        <div class="risk-badge" id="node2-fire-badge">LOW</div>
+        <div class="risk-alert-box" id="node2-fire-alert">
+          <span class="risk-alert-label" id="node2-fire-alert-label">No alert</span>
+          <span class="risk-alert-message" id="node2-fire-alert-msg"></span>
+          <span class="risk-alert-time" id="node2-fire-alert-time"></span>
+        </div>
+      </div>
+
+      <div id="node2-heat-risk" class="risk-card low">
+        <div class="risk-icon">🌡️</div>
+        <div class="risk-label">Extreme Heat Risk</div>
+        <div class="risk-percentage" id="node2-heat-score">--%</div>
+        <div class="risk-badge" id="node2-heat-badge">LOW</div>
+        <div class="risk-alert-box" id="node2-heat-alert">
+          <span class="risk-alert-label" id="node2-heat-alert-label">No alert</span>
+          <span class="risk-alert-message" id="node2-heat-alert-msg"></span>
+          <span class="risk-alert-time" id="node2-heat-alert-time"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- NODES SECTION -->
+    <div class="nodes">
+      <!-- NODE 01 -->
+      <div class="node-card">
+        <div class="node-title">🌊 NODE 01 - Flood & Landslide</div>
+
+        <div class="sensor-row">
+          <span class="sensor-label">Water Level:</span>
+          <span class="sensor-value" id="node1-water">-- cm</span>
+        </div>
+        <div class="sensor-row">
+          <span class="sensor-label">Soil Moisture:</span>
+          <span class="sensor-value" id="node1-soil">-- %</span>
+        </div>
+        <div class="sensor-row">
+          <span class="sensor-label">Rain:</span>
+          <span class="sensor-value" id="node1-rain">--</span>
+        </div>
+        <div class="sensor-row">
+          <span class="sensor-label">Tilt:</span>
+          <span class="sensor-value" id="node1-tilt">-- °</span>
+        </div>
+        <div class="sensor-row">
+          <span class="sensor-label">Temperature:</span>
+          <span class="sensor-value" id="node1-temp">-- °C</span>
+        </div>
+        <div class="sensor-row">
+          <span class="sensor-label">Humidity:</span>
+          <span class="sensor-value" id="node1-humidity">-- %</span>
+        </div>
+      </div>
+
+      <!-- NODE 02 -->
+      <div class="node-card node2">
+        <div class="node-title">🔥 NODE 02 - Fire & Heat</div>
+
+        <div class="sensor-row">
+          <span class="sensor-label">Smoke:</span>
+          <span class="sensor-value" id="node2-smoke">-- ppm</span>
+        </div>
+        <div class="sensor-row">
+          <span class="sensor-label">Temperature:</span>
+          <span class="sensor-value" id="node2-temp">-- °C</span>
+        </div>
+        <div class="sensor-row">
+          <span class="sensor-label">Humidity:</span>
+          <span class="sensor-value" id="node2-humidity">-- %</span>
+        </div>
+        <div class="sensor-row">
+          <span class="sensor-label">Flame:</span>
+          <span class="sensor-value" id="node2-flame">--</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- CHARTS -->
+    <div class="charts-section">
+      <h3>📈 Historical Data (Last 50 readings per node)</h3>
+      <div class="charts-grid">
+        <div class="chart-container">
+          <canvas id="node1-chart"></canvas>
+        </div>
+        <div class="chart-container">
+          <canvas id="node2-chart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- CONTROLS -->
+    <div class="controls">
+      <h3>🎮 Simulator Controls</h3>
+
+      <div class="button-group">
+        <button class="success" onclick="startSimulator()">▶ Start Simulator</button>
+        <button class="danger" onclick="stopSimulator()">⏹ Stop Simulator</button>
+        <button onclick="resetSimulator()">🔄 Reset Data</button>
+      </div>
+
+      <div class="divider"></div>
+
+      <h3 style="margin-top: 0;">📍 Trigger Scenarios</h3>
+
+      <div class="button-group">
+        <button onclick="triggerFlood()">🌊 Flood (Node 1)</button>
+        <button onclick="triggerLandslide()">🪨 Landslide (Node 1)</button>
+        <button onclick="triggerFire()">🔥 Fire (Node 2)</button>
+        <button onclick="triggerHeat()">🌡️ Extreme Heat (Node 2)</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.min.js"></script>
+  <script>
+    const socket = io();
+    let charts = {};
+    let chartData = {
+      node1: { timestamps: [], water: [], temp: [], humidity: [] },
+      node2: { timestamps: [], smoke: [], temp: [], humidity: [] }
+    };
+    let allAlerts = [];
+    let alarmShown = false;
+
+    // Initialize charts
+    function initCharts() {
+      const ctx1 = document.getElementById('node1-chart').getContext('2d');
+      charts.node1 = new Chart(ctx1, {
+        type: 'line',
+        data: {
+          labels: chartData.node1.timestamps,
+          datasets: [
+            {
+              label: 'Water Level (cm)',
+              data: chartData.node1.water,
+              borderColor: '#667eea',
+              backgroundColor: 'rgba(102, 126, 234, 0.1)',
+              tension: 0.4,
+              fill: true,
+              yAxisID: 'y'
+            },
+            {
+              label: 'Temperature (°C)',
+              data: chartData.node1.temp,
+              borderColor: '#ff8800',
+              backgroundColor: 'rgba(255, 136, 0, 0.1)',
+              tension: 0.4,
+              yAxisID: 'y1'
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: { title: { display: true, text: 'NODE 01: Water & Temperature' } },
+          scales: {
+            y: { type: 'linear', display: true, position: 'left' },
+            y1: { type: 'linear', display: true, position: 'right' }
+          }
+        }
+      });
+
+      const ctx2 = document.getElementById('node2-chart').getContext('2d');
+      charts.node2 = new Chart(ctx2, {
+        type: 'line',
+        data: {
+          labels: chartData.node2.timestamps,
+          datasets: [
+            {
+              label: 'Smoke (ppm)',
+              data: chartData.node2.smoke,
+              borderColor: '#ff6b6b',
+              backgroundColor: 'rgba(255, 107, 107, 0.1)',
+              tension: 0.4,
+              fill: true
+            },
+            {
+              label: 'Temperature (°C)',
+              data: chartData.node2.temp,
+              borderColor: '#ffc107',
+              backgroundColor: 'rgba(255, 193, 7, 0.1)',
+              tension: 0.4,
+              fill: true
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { title: { display: true, text: 'NODE 02: Smoke & Temperature' } }
+        }
+      });
+    }
+
+    // Update charts
+    function updateCharts(data) {
+      if (data.node_id === 'NODE_01') {
+        const time = new Date(data.timestamp).toLocaleTimeString();
+        chartData.node1.timestamps.push(time);
+        chartData.node1.water.push(data.water_level);
+        chartData.node1.temp.push(data.temperature);
+        chartData.node1.humidity.push(data.humidity);
+
+        if (chartData.node1.timestamps.length > 50) {
+          chartData.node1.timestamps.shift();
+          chartData.node1.water.shift();
+          chartData.node1.temp.shift();
+          chartData.node1.humidity.shift();
+        }
+
+        if (charts.node1) {
+          charts.node1.data.labels = chartData.node1.timestamps;
+          charts.node1.update('none');
+        }
+      } else if (data.node_id === 'NODE_02') {
+        const time = new Date(data.timestamp).toLocaleTimeString();
+        chartData.node2.timestamps.push(time);
+        chartData.node2.smoke.push(data.smoke);
+        chartData.node2.temp.push(data.temperature);
+        chartData.node2.humidity.push(data.humidity);
+
+        if (chartData.node2.timestamps.length > 50) {
+          chartData.node2.timestamps.shift();
+          chartData.node2.smoke.shift();
+          chartData.node2.temp.shift();
+          chartData.node2.humidity.shift();
+        }
+
+        if (charts.node2) {
+          charts.node2.data.labels = chartData.node2.timestamps;
+          charts.node2.update('none');
+        }
+      }
+    }
+
+    // Socket events
+    socket.on('sensor-update', (data) => {
+      if (data.node_id === 'NODE_01') {
+        updateNode1(data);
+      } else if (data.node_id === 'NODE_02') {
+        updateNode2(data);
+      }
+      updateCharts(data);
+      loadAlerts();
+    });
+
+    socket.on('simulator:status', (data) => {
+      const status = document.getElementById('sim-status');
+      if (data.running) {
+        status.textContent = 'Running';
+        status.classList.add('running');
+      } else {
+        status.textContent = 'Offline';
+        status.classList.remove('running');
+      }
+    });
+
+    function updateNode1(data) {
+      document.getElementById('node1-water').textContent = data.water_level ? data.water_level.toFixed(1) + ' cm' : '--';
+      document.getElementById('node1-soil').textContent = data.soil_moisture ? data.soil_moisture.toFixed(0) + ' %' : '--';
+      document.getElementById('node1-rain').textContent = data.rain ? '🌧 YES' : 'NO';
+      document.getElementById('node1-tilt').textContent = data.tilt ? data.tilt.toFixed(2) + ' °' : '--';
+      document.getElementById('node1-temp').textContent = data.temperature ? data.temperature.toFixed(1) + ' °C' : '--';
+      document.getElementById('node1-humidity').textContent = data.humidity ? data.humidity.toFixed(0) + ' %' : '--';
+    }
+
+    function updateNode2(data) {
+      document.getElementById('node2-smoke').textContent = data.smoke ? data.smoke.toFixed(0) : '--';
+      document.getElementById('node2-temp').textContent = data.temperature ? data.temperature.toFixed(1) + ' °C' : '--';
+      document.getElementById('node2-humidity').textContent = data.humidity ? data.humidity.toFixed(0) + ' %' : '--';
+      document.getElementById('node2-flame').textContent = data.flame ? '🔥 DETECTED' : 'NO';
+    }
+
+    // Load alerts
+    async function loadAlerts() {
+      try {
+        const res = await fetch('/api/alerts');
+        const alerts = await res.json();
+        allAlerts = alerts;
+
+        // Update badge count
+        const badgeCount = document.getElementById('alert-count');
+        if (alerts.length > 0) {
+          badgeCount.style.display = 'flex';
+          badgeCount.textContent = alerts.length;
+        } else {
+          badgeCount.style.display = 'none';
+        }
+
+        // Update alert panel (if expanded)
+        const container = document.getElementById('alerts-container');
+        if (alerts.length === 0) {
+          container.innerHTML = '<p style="color: #999; text-align: center; padding: 20px;">No active alerts</p>';
+        } else {
+          container.innerHTML = alerts.map(alert => `
+            <div class="alert-item ${alert.severity.toLowerCase()}">
+              <div>
+                <strong>${alert.node_id}: ${alert.hazard}</strong> - ${alert.severity}
+                <div class="alert-time">${new Date(alert.timestamp).toLocaleTimeString()}</div>
+              </div>
+              <span class="alert-close" onclick="resolveAlert('${alert._id}')">✕</span>
+            </div>
+          `).join('');
+        }
+
+        // Update risk display
+        updateRiskDisplay(alerts);
+
+        // TRIGGER ALARM for HIGH/CRITICAL
+        checkForCriticalAlerts(alerts);
+      } catch (err) {
+        console.error('Load alerts error:', err);
+      }
+    }
+
+    // Check for critical alerts and trigger alarm
+    function checkForCriticalAlerts(alerts) {
+      const criticalAlert = alerts.find(a => a.severity === 'CRITICAL' || a.severity === 'HIGH');
+
+      if (criticalAlert && !alarmShown) {
+        triggerAlarm(criticalAlert);
+        alarmShown = true;
+      } else if (!criticalAlert) {
+        alarmShown = false;
+      }
+    }
+
+    // Trigger alarm overlay
+    function triggerAlarm(alert) {
+      document.getElementById('alarm-icon').textContent =
+        alert.hazard === 'FLOOD' ? '🌊' :
+          alert.hazard === 'LANDSLIDE' ? '🪨' :
+            alert.hazard === 'FIRE' ? '🔥' : '🌡️';
+
+      document.getElementById('alarm-title').textContent = alert.hazard + ' DETECTED';
+      document.getElementById('alarm-severity').textContent = alert.severity + ' RISK';
+      document.getElementById('alarm-message').textContent = alert.message;
+
+      const overlay = document.getElementById('alarm-overlay');
+      overlay.classList.add('show');
+
+      // Play alarm sound (optional)
+      playAlarmSound();
+    }
+
+    // Close alarm
+    function closeAlarm() {
+      document.getElementById('alarm-overlay').classList.remove('show');
+    }
+
+    // Play alarm sound
+    function playAlarmSound() {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+
+      oscillator.frequency.value = 800;
+      oscillator.type = 'sine';
+
+      gain.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 0.5);
+    }
+
+    // Toggle alerts panel
+    function toggleAlerts() {
+      const panel = document.getElementById('alerts-panel');
+      panel.classList.toggle('expanded');
+    }
+
+    // Update risk display on cards
+    function updateRiskDisplay(alerts) {
+      // Reset all cards to low with "No alert"
+      ['node1-flood', 'node1-landslide', 'node2-fire', 'node2-heat'].forEach(id => {
+        const card = document.getElementById(`${id}-risk`);
+        const score = document.getElementById(`${id}-score`);
+        const badge = document.getElementById(`${id}-badge`);
+        const alertLabel = document.getElementById(`${id}-alert-label`);
+        const alertMsg = document.getElementById(`${id}-alert-msg`);
+        const alertTime = document.getElementById(`${id}-alert-time`);
+
+        if (card) {
+          card.className = `risk-card low`;
+          score.textContent = '---%';
+          badge.textContent = 'LOW';
+          if (alertLabel) alertLabel.textContent = 'No alert';
+          if (alertMsg) alertMsg.textContent = '';
+          if (alertTime) alertTime.textContent = '';
+        }
+      });
+
+      // Update based on alerts
+      alerts.forEach(alert => {
+        const nodeNum = alert.node_id === 'NODE_01' ? '1' : '2';
+        const hazard = alert.hazard.toLowerCase();
+        const cardId = `node${nodeNum}-${hazard}`;
+
+        const card = document.getElementById(`${cardId}-risk`);
+        const scoreBox = document.getElementById(`${cardId}-score`);
+        const badge = document.getElementById(`${cardId}-badge`);
+        const alertLabel = document.getElementById(`${cardId}-alert-label`);
+        const alertMsg = document.getElementById(`${cardId}-alert-msg`);
+        const alertTime = document.getElementById(`${cardId}-alert-time`);
+
+        if (card && scoreBox && badge) {
+          const severity = alert.severity.toLowerCase();
+          card.className = `risk-card ${severity}`;
+          scoreBox.textContent = Math.round(alert.risk_score) + '%';
+          badge.textContent = alert.severity;
+
+          if (alertLabel) alertLabel.textContent = alert.severity;
+          if (alertMsg) alertMsg.textContent = `${alert.hazard} risk at ${alert.severity} level (${Math.round(alert.risk_score)}%)`;
+          if (alertTime) alertTime.textContent = new Date(alert.timestamp).toLocaleTimeString();
+        }
+      });
+    }
+
+    // Resolve alert
+    async function resolveAlert(alertId) {
+      try {
+        await fetch(`/api/alerts/${alertId}/resolve`, { method: 'PUT' });
+        loadAlerts();
+      } catch (err) {
+        console.error('Resolve alert error:', err);
+      }
+    }
+
+    // Database status
+    async function checkDatabaseStatus() {
+      try {
+        const res = await fetch('/api/db-status');
+        const status = await res.json();
+
+        alert(`📊 Database Status\n\nTotal Readings: ${status.totalReadings}\nActive Alerts: ${status.totalAlerts}\nNode 1 Data: ${status.node1Readings}\nNode 2 Data: ${status.node2Readings}\nPredictions: ${status.totalPredictions}`);
+      } catch (err) {
+        console.error('DB status error:', err);
+      }
+    }
+
+    // Simulator controls
+    function startSimulator() { socket.emit('simulator:start'); }
+    function stopSimulator() { socket.emit('simulator:stop'); }
+    function resetSimulator() { socket.emit('simulator:reset'); }
+    function triggerFlood() { socket.emit('simulator:trigger-flood'); }
+    function triggerLandslide() { socket.emit('simulator:trigger-landslide'); }
+    function triggerFire() { socket.emit('simulator:trigger-fire'); }
+    function triggerHeat() { socket.emit('simulator:trigger-heat'); }
+
+    // Show readings already saved in the database (otherwise the page starts empty
+    // and only shows data that arrives while it is open)
+    async function loadHistory() {
+      for (const [nodeId, updateNode] of [['NODE_01', updateNode1], ['NODE_02', updateNode2]]) {
+        try {
+          const res = await fetch(`/api/sensor-data/history?node=${nodeId}&limit=50`);
+          const readings = await res.json();
+          if (!Array.isArray(readings) || readings.length === 0) continue;
+          readings.reverse().forEach(updateCharts);   // API returns newest first
+          updateNode(readings[readings.length - 1]);
+        } catch (err) {
+          console.error('Could not load history for', nodeId, err);
+        }
+      }
+    }
+
+    // Initialize
+    initCharts();
+    loadHistory();
+    loadAlerts();
+  </script>
+</body>
+
+</html>
