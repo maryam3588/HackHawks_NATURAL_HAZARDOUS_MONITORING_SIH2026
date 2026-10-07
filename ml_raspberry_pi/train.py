@@ -3,7 +3,7 @@
 Ported from the Colab "complete pipeline" with these changes:
 * forecasting phase removed (all four forecasters scored worse than
   "repeat the last reading" in the Colab run);
-* reads the V3 files/roles produced by generate_dataset.py;
+* reads the files/roles produced by generate_dataset.py;
 * models train on plain float32 arrays (HistGradientBoosting handles NaN
   itself), so live inference needs no pandas;
 * the calibrator is stored as two floats, so applying it needs no sklearn;
@@ -74,6 +74,14 @@ def hazard_xy(dataframe, config):
     return feature_matrix(subset, config["features"]), subset[config["target"]].to_numpy(dtype=int)
 
 
+def count_episodes(dataframe, config):
+    """Number of separate warning episodes (0 -> 1 transitions per site)."""
+    subset = dataframe[dataframe["node_id"] == config["node_id"]]
+    target = subset[config["target"]]
+    previous = target.groupby(subset["site_id"]).shift(1).fillna(0)
+    return int(((target == 1) & (previous == 0)).sum())
+
+
 def fit_calibrator(raw_probabilities, y_true):
     inputs = np.clip(raw_probabilities, 1e-6, 1 - 1e-6).reshape(-1, 1)
     model = LogisticRegression(max_iter=1000, random_state=C.RANDOM_SEED)
@@ -106,21 +114,21 @@ def main():
 
     started = time.time()
     print("=" * 90)
-    print("DISASTER V3 PIPELINE: TRAIN -> CALIBRATION -> THRESHOLDS -> LOCKED TESTS")
+    print("DISASTER PIPELINE: TRAIN -> CALIBRATION -> THRESHOLDS -> LOCKED TESTS")
     print("=" * 90)
 
-    datasets = {key: load_dataset(args.data, key) for key in C.DATASET_FILES}
-
     base_rows, calibration_rows, threshold_rows, locked_rows, acceptance_rows = [], [], [], [], []
-    registry = []
+    candidates = {}
 
+    # Datasets are loaded one phase at a time and freed afterwards so the
+    # whole pipeline fits in a Raspberry Pi's RAM.
+
+    # ---- Phase 1: base classifiers --------------------------------------
+    print("\nPHASE 1: BASE CLASSIFIERS")
+    train_df = load_dataset(args.data, "train")
+    models = {}
     for hazard, config in C.HAZARDS.items():
-        print("\n" + "=" * 90)
-        print("HAZARD:", hazard.upper())
-        print("=" * 90)
-
-        # ---- Phase 1: base classifier --------------------------------
-        X_train, y_train = hazard_xy(datasets["train"], config)
+        X_train, y_train = hazard_xy(train_df, config)
         model = HistGradientBoostingClassifier(
             learning_rate=0.05,
             max_iter=args.max_iter,
@@ -131,22 +139,31 @@ def main():
             random_state=C.RANDOM_SEED,
         )
         model.fit(X_train, y_train)
-        version = f"{hazard}_v3"
+        models[hazard] = model
+        version = f"{hazard}_{C.MODEL_VERSION}"
 
         train_metrics = calculate_classification_metrics(y_train, model.predict_proba(X_train)[:, 1], 0.50)
         print_classification_metrics(f"{hazard.upper()} BASE TRAIN (iterations used: {model.n_iter_})", train_metrics)
-        base_rows.append(tag(train_metrics, hazard=hazard, stage="BASE_TRAIN", dataset="train", model_version=version))
+        base_rows.append(tag(train_metrics, hazard=hazard, stage="BASE_TRAIN", dataset="train",
+                             model_version=version, episodes=count_episodes(train_df, config)))
+    del train_df
 
-        # ---- Phase 2: calibration + ordered thresholds ---------------
-        X_cal, y_cal = hazard_xy(datasets["calibration"], config)
-        X_thr, y_thr = hazard_xy(datasets["threshold_validation"], config)
+    # ---- Phase 2: calibration + ordered thresholds ----------------------
+    print("\nPHASE 2: CALIBRATION + ORDERED THRESHOLDS")
+    calibration_df = load_dataset(args.data, "calibration")
+    threshold_df = load_dataset(args.data, "threshold_validation")
+    for hazard, config in C.HAZARDS.items():
+        model = models[hazard]
+        version = f"{hazard}_{C.MODEL_VERSION}"
+        X_cal, y_cal = hazard_xy(calibration_df, config)
+        X_thr, y_thr = hazard_xy(threshold_df, config)
+
         empty = [name for name, y in [("calibration", y_cal), ("threshold_validation", y_thr)]
                  if len(np.unique(y)) < 2]
         if empty:
             reason = f"no positive (or no negative) rows in: {', '.join(empty)} - generate more data"
-            print("CANNOT CALIBRATE:", reason)
+            print(f"{hazard.upper()} CANNOT CALIBRATE:", reason)
             acceptance_rows.append({"hazard": hazard, "candidate_status": "FAIL", "reason": reason})
-            (model_dir / f"{version}.joblib").unlink(missing_ok=True)
             continue
 
         calibrator = fit_calibrator(model.predict_proba(X_cal)[:, 1], y_cal)
@@ -154,48 +171,78 @@ def main():
             y_cal, apply_calibrator(calibrator, model.predict_proba(X_cal)[:, 1]), 0.50
         )
         print_classification_metrics(f"{hazard.upper()} CALIBRATION", cal_metrics)
-        calibration_rows.append(tag(cal_metrics, hazard=hazard, stage="CALIBRATION", dataset="calibration", model_version=version))
+        calibration_rows.append(tag(cal_metrics, hazard=hazard, stage="CALIBRATION", dataset="calibration",
+                                    model_version=version, episodes=count_episodes(calibration_df, config)))
 
         thr_probabilities = apply_calibrator(calibrator, model.predict_proba(X_thr)[:, 1])
         selection = select_ordered_thresholds(y_thr, thr_probabilities)
-
         if selection["status"] == "FAIL":
-            print("THRESHOLD SELECTION FAILED:", selection)
+            print(f"{hazard.upper()} THRESHOLD SELECTION FAILED:", selection["reason"])
             acceptance_rows.append({"hazard": hazard, "candidate_status": "FAIL", "reason": selection["reason"]})
-            # Never leave a model from an earlier run behind for a hazard that now fails
-            (model_dir / f"{version}.joblib").unlink(missing_ok=True)
             continue
 
         watch_threshold = selection["watch_threshold"]
         warning_threshold = selection["warning_threshold"]
         if watch_threshold == warning_threshold:
-            print(f"NOTE: WATCH and WARNING thresholds are identical ({watch_threshold:.2f});"
-                  " the two alert tiers will always fire together for this hazard.")
+            print(f"NOTE: {hazard} WATCH and WARNING thresholds are identical ({watch_threshold:.2f});"
+                  " the two alert tiers will always fire together.")
 
         for stage, threshold in [("WATCH", watch_threshold), ("WARNING", warning_threshold)]:
             stage_metrics = calculate_classification_metrics(y_thr, thr_probabilities, threshold)
             print_classification_metrics(f"{hazard.upper()} THRESHOLD VALIDATION {stage}", stage_metrics)
-            threshold_rows.append(tag(stage_metrics, hazard=hazard, stage=stage, dataset="threshold_validation", model_version=version))
+            threshold_rows.append(tag(stage_metrics, hazard=hazard, stage=stage, dataset="threshold_validation",
+                                      model_version=version, episodes=count_episodes(threshold_df, config)))
 
-        # ---- Phase 3: locked tests ------------------------------------
-        results = {}
-        for test_name in ["locked_normal", "locked_faults", "locked_ood"]:
-            X_test, y_test = hazard_xy(datasets[test_name], config)
-            probabilities = apply_calibrator(calibrator, model.predict_proba(X_test)[:, 1])
-            results[test_name] = {}
-            for stage, threshold in [("WATCH", watch_threshold), ("WARNING", warning_threshold)]:
+        candidates[hazard] = {
+            "model": model,
+            "calibrator": calibrator,
+            "watch_threshold": watch_threshold,
+            "warning_threshold": warning_threshold,
+            "version": version,
+        }
+    del calibration_df, threshold_df
+
+    # ---- Phase 3: locked tests ------------------------------------------
+    print("\nPHASE 3: LOCKED TESTS")
+    results = {hazard: {} for hazard in candidates}
+    for test_name in ["locked_normal", "locked_faults", "locked_ood"]:
+        test_df = load_dataset(args.data, test_name)
+        for hazard, candidate in candidates.items():
+            config = C.HAZARDS[hazard]
+            X_test, y_test = hazard_xy(test_df, config)
+            episodes = count_episodes(test_df, config)
+            probabilities = apply_calibrator(candidate["calibrator"], candidate["model"].predict_proba(X_test)[:, 1])
+            results[hazard][test_name] = {"episodes": episodes}
+            for stage in ["WATCH", "WARNING"]:
+                threshold = candidate[f"{stage.lower()}_threshold"]
                 stage_metrics = calculate_classification_metrics(y_test, probabilities, threshold)
-                print_classification_metrics(f"{hazard.upper()} {test_name.upper()} {stage}", stage_metrics)
-                results[test_name][stage] = stage_metrics
-                locked_rows.append(tag(dict(stage_metrics), hazard=hazard, stage=stage, dataset=test_name, model_version=version))
+                print_classification_metrics(f"{hazard.upper()} {test_name.upper()} {stage} ({episodes} episodes)",
+                                             stage_metrics)
+                results[hazard][test_name][stage] = stage_metrics
+                locked_rows.append(tag(dict(stage_metrics), hazard=hazard, stage=stage, dataset=test_name,
+                                       model_version=candidate["version"], episodes=episodes))
+        del test_df
 
-        normal_watch = results["locked_normal"]["WATCH"]
-        normal_warning = results["locked_normal"]["WARNING"]
-        fault_recall_drop = normal_watch["recall"] - results["locked_faults"]["WATCH"]["recall"]
-        ood_recall_drop = normal_watch["recall"] - results["locked_ood"]["WATCH"]["recall"]
+    # ---- Acceptance gates + model export --------------------------------
+    print("\nACCEPTANCE")
+    registry = []
+    for hazard, config in C.HAZARDS.items():
+        model_path = model_dir / f"{hazard}_{C.MODEL_VERSION}.joblib"
+        candidate = candidates.get(hazard)
+        if candidate is None:
+            # Never leave a model from an earlier run behind for a hazard that now fails
+            model_path.unlink(missing_ok=True)
+            continue
+
+        res = results[hazard]
+        normal_watch = res["locked_normal"]["WATCH"]
+        normal_warning = res["locked_normal"]["WARNING"]
+        fault_recall_drop = normal_watch["recall"] - res["locked_faults"]["WATCH"]["recall"]
+        ood_recall_drop = normal_watch["recall"] - res["locked_ood"]["WATCH"]["recall"]
+        min_episodes = min(res[name]["episodes"] for name in res)
 
         gates = {
-            "ordered_thresholds_pass": watch_threshold <= warning_threshold,
+            "ordered_thresholds_pass": candidate["watch_threshold"] <= candidate["warning_threshold"],
             "watch_recall_pass": normal_watch["recall"] >= C.WATCH_RECALL_TARGET,
             "warning_precision_pass": normal_warning["precision"] >= C.WARNING_PRECISION_TARGET,
             "pr_auc_pass": normal_watch["pr_auc"]
@@ -206,19 +253,23 @@ def main():
             "ood_robustness_pass": ood_recall_drop <= C.MAX_OOD_RECALL_DROP,
         }
         gates = {name: bool(value) for name, value in gates.items()}
-        status = "PASS" if all(gates.values()) else "FAIL"
+        if min_episodes < C.MIN_TEST_EPISODES:
+            status = "INSUFFICIENT_EVENTS"
+        else:
+            status = "PASS" if all(gates.values()) else "FAIL"
 
-        print("\nACCEPTANCE GATES")
+        print(f"\n{hazard.upper()} (fewest episodes in a locked test: {min_episodes})")
         for name, value in gates.items():
             print(f"  {name}: {'PASS' if value else 'FAIL'}")
-        print("FINAL STATUS:", status)
+        print("  FINAL STATUS:", status)
 
         acceptance_rows.append({
             "hazard": hazard,
-            "model_version": version,
+            "model_version": candidate["version"],
             "candidate_status": status,
-            "watch_threshold": watch_threshold,
-            "warning_threshold": warning_threshold,
+            "min_test_episodes": min_episodes,
+            "watch_threshold": candidate["watch_threshold"],
+            "warning_threshold": candidate["warning_threshold"],
             "normal_watch_precision": normal_watch["precision"],
             "normal_watch_recall": normal_watch["recall"],
             "normal_warning_precision": normal_warning["precision"],
@@ -231,28 +282,26 @@ def main():
             **gates,
         })
 
-        artifact = {
-            "model": model,
-            "calibrator": calibrator,
+        joblib.dump({
+            "model": candidate["model"],
+            "calibrator": candidate["calibrator"],
             "hazard": hazard,
             "node_id": config["node_id"],
             "target": config["target"],
             "features": list(config["features"]),
-            "watch_threshold": watch_threshold,
-            "warning_threshold": warning_threshold,
+            "watch_threshold": candidate["watch_threshold"],
+            "warning_threshold": candidate["warning_threshold"],
             "status": status,
-            "version": version,
+            "version": candidate["version"],
             "data_source": C.DATA_SOURCE,
             "sklearn_version": sklearn.__version__,
-        }
-        model_path = model_dir / f"{version}.joblib"
-        joblib.dump(artifact, model_path, compress=3)
+        }, model_path, compress=3)
         registry.append({
             "hazard": hazard,
             "file": model_path.name,
             "status": status,
-            "watch_threshold": watch_threshold,
-            "warning_threshold": warning_threshold,
+            "watch_threshold": candidate["watch_threshold"],
+            "warning_threshold": candidate["warning_threshold"],
         })
 
     # ---- Reports -------------------------------------------------------
@@ -280,13 +329,13 @@ def main():
     print("\n" + "=" * 90)
     print("SUMMARY")
     print("=" * 90)
-    acceptance_df = pd.DataFrame(acceptance_rows)
-    for _, row in acceptance_df.iterrows():
-        if "normal_watch_recall" not in row or pd.isna(row.get("normal_watch_recall")):
+    order = {hazard: index for index, hazard in enumerate(C.HAZARDS)}
+    for row in sorted(acceptance_rows, key=lambda r: order[r["hazard"]]):
+        if "normal_watch_recall" not in row:
             print(f"{row['hazard'].upper()} | STATUS={row['candidate_status']} | {row.get('reason', '')}")
             continue
         print(
-            f"{row['hazard'].upper()} | STATUS={row['candidate_status']} | "
+            f"{row['hazard'].upper()} | STATUS={row['candidate_status']} | episodes>={row['min_test_episodes']} | "
             f"WATCH>={row['watch_threshold']:.2f} recall={row['normal_watch_recall']:.4f} | "
             f"WARNING>={row['warning_threshold']:.2f} precision={row['normal_warning_precision']:.4f} | "
             f"fault drop={row['fault_recall_drop']:.4f} | OOD drop={row['ood_recall_drop']:.4f}"
@@ -295,7 +344,7 @@ def main():
     print(f"\nModels:  {model_dir}")
     print(f"Reports: {report_dir}")
     print(f"Total time: {time.time() - started:.1f}s")
-    print("\nDATA SOURCE: SYNTHETIC_V3 - REAL-WORLD PERFORMANCE NOT ESTABLISHED")
+    print(f"\nDATA SOURCE: {C.DATA_SOURCE.upper()} - REAL-WORLD PERFORMANCE NOT ESTABLISHED")
 
 
 if __name__ == "__main__":

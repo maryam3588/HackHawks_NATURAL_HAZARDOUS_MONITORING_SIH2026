@@ -9,9 +9,9 @@
 ``test_feature_parity.py`` checks that both produce the same numbers.
 
 Lags and rolling windows count *rows*, not minutes, exactly like the Colab
-pipeline. If a node misses a 5-minute reading, the "15 min" window silently
-covers a longer time span. The live engine resets a node's history when the
-gap exceeds ``max_gap_minutes`` to limit that.
+pipeline. If a node misses a 5-minute reading, the "15 min" window covers a
+slightly longer span. Both versions restart a node's history when the gap
+between readings exceeds ``config.MAX_GAP_MINUTES``.
 """
 
 import math
@@ -22,7 +22,7 @@ import numpy as np
 
 import config as C
 
-GROUP_COLUMNS = ["site_id", "node_id"]
+GROUP_COLUMNS = ["site_id", "node_id", "_segment"]
 
 
 # ----------------------------------------------------------------------
@@ -57,6 +57,13 @@ def prepare_dataframe(dataframe):
                 pd.to_numeric(dataframe[column], errors="coerce")
                 .fillna(0).astype(int).clip(0, 1)
             )
+
+    # Start a new history segment after a gap, exactly like the live engine
+    gap_minutes = (
+        dataframe.groupby(["site_id", "node_id"], sort=False)["timestamp"].diff().dt.total_seconds() / 60
+    )
+    new_segment = gap_minutes.isna() | (gap_minutes > C.MAX_GAP_MINUTES)
+    dataframe["_segment"] = new_segment.cumsum()
 
     hour = dataframe["timestamp"].dt.hour
     dataframe["hour_sin"] = np.sin(2 * np.pi * hour / 24)
@@ -115,7 +122,7 @@ def prepare_dataframe(dataframe):
     dataframe["hot_window_fraction_1h"] = np.where(
         valid_count > 0, hot_count / rows_in_window, np.nan
     )
-    dataframe = dataframe.drop(columns=["_hot", "_valid_temp"])
+    dataframe = dataframe.drop(columns=["_hot", "_valid_temp", "_segment"])
 
     return dataframe
 
@@ -171,7 +178,7 @@ def _nan_max(values):
 class StreamingFeatureEngine:
     """Keeps a short rolling history per (site, node) and emits features."""
 
-    def __init__(self, max_gap_minutes=3 * C.SAMPLE_INTERVAL_MINUTES):
+    def __init__(self, max_gap_minutes=C.MAX_GAP_MINUTES):
         self.max_gap_minutes = max_gap_minutes
         self.history = {}
         self.last_timestamp = {}

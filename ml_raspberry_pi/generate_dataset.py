@@ -1,7 +1,10 @@
-"""Synthetic V3 dataset generator (Colab version ported to plain Python).
+"""Synthetic V4 dataset generator.
 
-Same simulation logic and random seed as the Colab notebook; only the
-Colab-specific parts (/content paths, display()) were removed.
+The environment simulation (weather, events, hard negatives) is the Colab
+V3 logic unchanged. What changed in V4 is the sensor side: each node now
+reports its own readings through ``sensor_errors.py`` (noise, calibration,
+drift, cross-sensitivity, quantisation, failures, packet loss) instead of
+both nodes sharing one perfect set of values.
 
 Usage:
     python3 generate_dataset.py            # full size (~5 min on a Pi 4)
@@ -18,9 +21,12 @@ import numpy as np
 import pandas as pd
 
 import config as C
+import sensor_errors as SE
 
 RANDOM_SEED = 20260925
-rng = np.random.default_rng(RANDOM_SEED)
+rng = np.random.default_rng(RANDOM_SEED)          # true environment
+error_rng = np.random.default_rng(RANDOM_SEED + 1)  # sensor errors, separate so
+                                                    # ideal vs realistic share the same truth
 
 ROWS_PER_DAY = 288
 
@@ -31,10 +37,6 @@ def clip(value, low, high):
 
 def sigmoid(value):
     return float(1.0 / (1.0 + np.exp(-value)))
-
-
-def tinyml_label(score):
-    return int(score >= 0.60)
 
 
 SITE_PROFILES = {
@@ -251,92 +253,6 @@ def apply_hard_negative(values, scenario):
     return values
 
 
-def make_tinyml_scores(values):
-    tilt = np.sqrt(values["tilt_x_deg"] ** 2 + values["tilt_y_deg"] ** 2)
-
-    flood_score = sigmoid(
-        -6.0
-        + 0.055 * values["water_level_cm"]
-        + 0.045 * values["rainfall_mm_h"]
-        + 0.015 * values["soil_moisture_pct"]
-        + rng.normal(0, 1.1)
-    )
-    landslide_score = sigmoid(
-        -7.0
-        + 0.035 * values["soil_moisture_pct"]
-        + 0.25 * tilt
-        + 1.20 * max(values["acceleration_g"] - 1.0, 0)
-        + 0.020 * values["rainfall_mm_h"]
-        + rng.normal(0, 1.1)
-    )
-    wildfire_score = sigmoid(
-        -7.0
-        + 0.045 * values["temperature_c"]
-        - 0.014 * values["humidity_pct"]
-        + 0.0030 * values["smoke_raw"]
-        + 0.0010 * values["gas_raw"]
-        + 0.75 * values["flame"]
-        + rng.normal(0, 1.2)
-    )
-    heat_score = sigmoid(
-        -9.0 + 0.16 * values["temperature_c"] - 0.012 * values["humidity_pct"] + rng.normal(0, 1.15)
-    )
-
-    return {
-        "node1_flood_score": clip(flood_score, 0, 1),
-        "node1_landslide_score": clip(landslide_score, 0, 1),
-        "node2_wildfire_score": clip(wildfire_score, 0, 1),
-        "node2_extreme_heat_score": clip(heat_score, 0, 1),
-        "node1_flood_label": tinyml_label(flood_score),
-        "node1_landslide_label": tinyml_label(landslide_score),
-        "node2_wildfire_label": tinyml_label(wildfire_score),
-        "node2_extreme_heat_label": tinyml_label(heat_score),
-    }
-
-
-def inject_fault(values, fault_type, drift_scale):
-    values = values.copy()
-
-    if fault_type == "normal":
-        return values
-
-    if fault_type == "missing":
-        sensor = rng.choice([
-            "water_level_cm", "rainfall_mm_h", "soil_moisture_pct",
-            "temperature_c", "humidity_pct", "smoke_raw", "gas_raw",
-        ])
-        values[sensor] = np.nan
-
-    elif fault_type == "spike":
-        sensor = rng.choice(["water_level_cm", "temperature_c", "smoke_raw", "gas_raw", "soil_moisture_pct"])
-        additions = {
-            "water_level_cm": rng.uniform(50, 120),
-            "temperature_c": rng.uniform(20, 45),
-            "smoke_raw": rng.uniform(700, 2200),
-            "gas_raw": rng.uniform(1000, 3000),
-            "soil_moisture_pct": rng.uniform(25, 55),
-        }
-        limits = {
-            "water_level_cm": (0, 350),
-            "temperature_c": (-10, 100),
-            "smoke_raw": (0, 7000),
-            "gas_raw": (0, 12000),
-            "soil_moisture_pct": (0, 100),
-        }
-        low, high = limits[sensor]
-        values[sensor] = clip(values[sensor] + additions[sensor], low, high)
-
-    elif fault_type == "drift":
-        values["temperature_c"] = clip(values["temperature_c"] + 3.5 * drift_scale, -10, 100)
-        values["water_level_cm"] = clip(values["water_level_cm"] + 6.0 * drift_scale, 0, 350)
-
-    elif fault_type == "stuck":
-        sensor = rng.choice(["water_level_cm", "temperature_c", "soil_moisture_pct", "smoke_raw"])
-        values[sensor] = round(values[sensor] / 5) * 5
-
-    return values
-
-
 def schedule_states(total_steps, event_fraction):
     states = ["normal"] * total_steps
     target_event_steps = int(total_steps * event_fraction)
@@ -391,112 +307,110 @@ def state_parts(state):
     return state.split(":", 1)
 
 
-def generate_dataset(out_dir, file_name, role, site_prefix, sites, days,
-                     event_fraction, start_time, faults, ood):
-    records = []
-    total_steps = days * ROWS_PER_DAY
+def simulate_site_truth(states, profile, site_start):
+    """True environment + labels for one site, one row per 5-minute step."""
+    rows = []
+    previous = start_state(profile)
     lead_phases = ["pre_event", "watch", "warning", "event"]
+
+    for step, state in enumerate(states):
+        timestamp = site_start + timedelta(minutes=step * C.SAMPLE_INTERVAL_MINUTES)
+        kind, detail = state_parts(state)
+        values = normal_step(previous, profile, timestamp)
+
+        event_type = "normal"
+        event_phase = "normal"
+        if kind in EVENT_TYPES:
+            event_type = kind
+            event_phase = detail
+            values = apply_event_dynamics(values, event_type, PROGRESS_MAP.get(event_phase, 0.0))
+        elif kind == "hard_negative":
+            values = apply_hard_negative(values, detail)
+            event_phase = "hard_negative"
+
+        labels = {
+            "flood_event": int("flood" in event_type and event_phase == "event"),
+            "landslide_event": int("landslide" in event_type and event_phase == "event"),
+            "wildfire_event": int("wildfire" in event_type and event_phase == "event"),
+            "extreme_heat_event": int("extreme_heat" in event_type and event_phase == "event"),
+        }
+        rows.append({
+            "timestamp": timestamp.isoformat(),
+            **{k: v for k, v in values.items() if not k.endswith("_memory")},
+            **labels,
+            "flood_within_15m": int("flood" in event_type and event_phase in lead_phases),
+            "landslide_within_15m": int("landslide" in event_type and event_phase in lead_phases),
+            "wildfire_within_15m": int("wildfire" in event_type and event_phase in lead_phases),
+            "extreme_heat_within_60m": int("extreme_heat" in event_type and event_phase in lead_phases),
+            "is_disaster": int(max(labels.values()) == 1),
+            "event_subtype": event_type,
+            "event_phase": event_phase,
+            "scenario_type": state,
+        })
+        previous = values.copy()
+
+    return pd.DataFrame(rows)
+
+
+def generate_dataset(out_dir, file_name, role, site_prefix, sites, days,
+                     event_fraction, start_time, failures, ood, ideal_sensors):
+    frames = []
+    total_steps = days * ROWS_PER_DAY
+    label_columns = [
+        "flood_event", "landslide_event", "wildfire_event", "extreme_heat_event",
+        "flood_within_15m", "landslide_within_15m", "wildfire_within_15m",
+        "extreme_heat_within_60m", "is_disaster", "event_subtype", "event_phase", "scenario_type",
+    ]
 
     for site_index in range(sites):
         site_id = f"{site_prefix}_{site_index + 1:02d}"
         profile = profile_name(site_index + 1, ood)
         states = schedule_states(total_steps, event_fraction)
-
-        previous = start_state(profile)
-        fault_remaining = 0
-        active_fault = "normal"
-
         site_start = start_time + timedelta(days=site_index * (days + 4))
+        truth = simulate_site_truth(states, profile, site_start)
 
-        for step, state in enumerate(states):
-            timestamp = site_start + timedelta(minutes=step * C.SAMPLE_INTERVAL_MINUTES)
-            kind, detail = state_parts(state)
+        for node_id in ["node1", "node2"]:
+            if ideal_sensors:
+                measured, fault_labels, delivered = SE.ideal_node(truth, node_id)
+            else:
+                scale = 3.0 if role == "locked_faults" else 1.0  # make the fault test set fault-heavy
+                measured, fault_labels, delivered = SE.measure_node(truth, node_id, error_rng, failures, scale)
+            tinyml = SE.tinyml_scores(measured, node_id, error_rng)
 
-            values = normal_step(previous, profile, timestamp)
+            frame = pd.concat(
+                [truth[["timestamp"]], measured, tinyml, truth[label_columns]], axis=1
+            )
+            frame.insert(1, "node_id", node_id)
+            frame.insert(2, "site_id", site_id)
+            frame.insert(3, "sensor_status", np.where(fault_labels == "normal", "NORMAL", "FAULT"))
+            frame["data_source"] = C.DATA_SOURCE
+            frame["dataset_role"] = role
+            frame["site_climate_profile"] = profile
+            frame["sensor_fault_type"] = fault_labels
+            frame["sensor_model"] = "ideal" if ideal_sensors else "realistic"
+            frame["packet_delivered"] = delivered
+            frames.append(frame)
 
-            event_type = "normal"
-            event_phase = "normal"
+    dataframe = pd.concat(frames, ignore_index=True)
+    expected_rows = len(dataframe)
+    dataframe = dataframe[dataframe.pop("packet_delivered")].reset_index(drop=True)
+    packet_loss = 1 - len(dataframe) / expected_rows
 
-            if kind in EVENT_TYPES:
-                event_type = kind
-                event_phase = detail
-                values = apply_event_dynamics(values, event_type, PROGRESS_MAP.get(event_phase, 0.0))
-            elif kind == "hard_negative":
-                values = apply_hard_negative(values, detail)
-                event_phase = "hard_negative"
-
-            fault_type = "normal"
-
-            if faults:
-                if fault_remaining <= 0:
-                    if rng.random() < 0.02:
-                        active_fault = rng.choice(["missing", "spike", "drift", "stuck"])
-                        fault_remaining = int(rng.integers(2, 15))
-                    else:
-                        active_fault = "normal"
-
-                fault_type = active_fault
-                values = inject_fault(values, active_fault, step / max(total_steps - 1, 1))
-                fault_remaining -= 1
-
-            tinyml = make_tinyml_scores(values)
-
-            labels = {
-                "flood_event": int("flood" in event_type and event_phase == "event"),
-                "landslide_event": int("landslide" in event_type and event_phase == "event"),
-                "wildfire_event": int("wildfire" in event_type and event_phase == "event"),
-                "extreme_heat_event": int("extreme_heat" in event_type and event_phase == "event"),
-            }
-
-            warning_targets = {
-                "flood_within_15m": int("flood" in event_type and event_phase in lead_phases),
-                "landslide_within_15m": int("landslide" in event_type and event_phase in lead_phases),
-                "wildfire_within_15m": int("wildfire" in event_type and event_phase in lead_phases),
-                "extreme_heat_within_60m": int("extreme_heat" in event_type and event_phase in lead_phases),
-            }
-
-            sensor_status = "FAULT" if fault_type != "normal" else "NORMAL"
-
-            for node_id in ["node1", "node2"]:
-                records.append({
-                    "timestamp": timestamp.isoformat(),
-                    "node_id": node_id,
-                    "site_id": site_id,
-                    "sensor_status": sensor_status,
-                    **values,
-                    **tinyml,
-                    **labels,
-                    **warning_targets,
-                    "is_disaster": int(max(labels.values()) == 1),
-                    "event_subtype": event_type,
-                    "event_phase": event_phase,
-                    "data_source": C.DATA_SOURCE,
-                    "dataset_role": role,
-                    "scenario_type": state,
-                    "site_climate_profile": profile,
-                    "sensor_fault_type": fault_type,
-                })
-
-            previous = values.copy()
-
-            for key, value in start_state(profile).items():
-                if key not in previous or pd.isna(previous[key]):
-                    previous[key] = value
-
-    dataframe = pd.DataFrame(records)
     output_path = out_dir / file_name
     dataframe.to_csv(output_path, index=False)
-    return dataframe, output_path
+    return dataframe, output_path, packet_loss
 
 
-# (file key, role, site prefix, sites, days, event fraction, start, faults, ood)
+# (file key, role, site prefix, sites, days, event fraction, start, failures, ood)
+# Site counts are sized so every held-out set holds roughly 30 episodes per
+# hazard; the Colab sizes gave 2-7, too few for a meaningful PASS/FAIL.
 DATASET_SPECS = [
-    ("train", "train", "train_v3_site", 10, 30, 0.34, datetime(2025, 1, 1), True, False),
-    ("calibration", "calibration", "calibration_v3_site", 3, 25, 0.16, datetime(2025, 12, 1), True, False),
-    ("threshold_validation", "threshold_validation", "threshold_v3_site", 3, 25, 0.13, datetime(2026, 3, 1), True, False),
-    ("locked_normal", "locked_normal", "locked_normal_v3_site", 3, 25, 0.08, datetime(2026, 6, 1), False, False),
-    ("locked_faults", "locked_faults", "locked_fault_v3_site", 2, 25, 0.08, datetime(2026, 9, 1), True, False),
-    ("locked_ood", "locked_ood", "locked_ood_v3_site", 2, 25, 0.10, datetime(2026, 11, 1), True, True),
+    ("train", "train", "train_site", 10, 30, 0.34, datetime(2025, 1, 1), True, False),
+    ("calibration", "calibration", "calibration_site", 10, 25, 0.16, datetime(2025, 12, 1), True, False),
+    ("threshold_validation", "threshold_validation", "threshold_site", 12, 25, 0.13, datetime(2026, 3, 1), True, False),
+    ("locked_normal", "locked_normal", "locked_normal_site", 20, 25, 0.08, datetime(2026, 6, 1), False, False),
+    ("locked_faults", "locked_faults", "locked_fault_site", 20, 25, 0.08, datetime(2026, 9, 1), True, False),
+    ("locked_ood", "locked_ood", "locked_ood_site", 16, 25, 0.10, datetime(2026, 11, 1), True, True),
 ]
 
 
@@ -505,19 +419,23 @@ def main():
     parser.add_argument("--out", type=Path, default=C.DATA_DIR, help="output folder")
     parser.add_argument("--quick", action="store_true",
                         help="small dataset (fewer sites/days) for a fast smoke test")
+    parser.add_argument("--ideal-sensors", action="store_true",
+                        help="perfect sensors (no noise, errors, failures or packet loss) for comparison")
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
-    print("Generating V3 datasets into", args.out)
+    mode = "IDEAL sensors" if args.ideal_sensors else "REALISTIC sensors"
+    print(f"Generating {C.DATA_SOURCE} datasets ({mode}) into {args.out}")
 
     manifest_rows = []
-    for key, role, prefix, sites, days, fraction, start, faults, ood in DATASET_SPECS:
+    for key, role, prefix, sites, days, fraction, start, failures, ood in DATASET_SPECS:
         if args.quick:
             sites = min(sites, 4 if key == "train" else 2)
             days = min(days, 10)
         started = time.time()
-        dataframe, path = generate_dataset(
-            args.out, C.DATASET_FILES[key], role, prefix, sites, days, fraction, start, faults, ood
+        dataframe, path, packet_loss = generate_dataset(
+            args.out, C.DATASET_FILES[key], role, prefix, sites, days, fraction, start,
+            failures, ood, args.ideal_sensors,
         )
         print(f"  {path.name}: {len(dataframe)} rows in {time.time() - started:.1f}s")
 
@@ -526,6 +444,8 @@ def main():
             "role": role,
             "rows": len(dataframe),
             "sites": dataframe["site_id"].nunique(),
+            "sensor_model": "ideal" if args.ideal_sensors else "realistic",
+            "packet_loss": round(packet_loss, 4),
             "fault_ratio": round((dataframe["sensor_status"] == "FAULT").mean(), 4),
             "flood_target_rate": round(dataframe["flood_within_15m"].mean(), 4),
             "landslide_target_rate": round(dataframe["landslide_within_15m"].mean(), 4),
@@ -537,9 +457,9 @@ def main():
     manifest_df = pd.DataFrame(manifest_rows)
     manifest_df.to_csv(args.out / C.MANIFEST_FILE, index=False)
 
-    print("\nV3 DATASET MANIFEST")
+    print(f"\n{C.DATA_SOURCE.upper()} DATASET MANIFEST")
     print(manifest_df.to_string(index=False))
-    print("\nV3 DATASET GENERATION COMPLETE")
+    print("\nDATASET GENERATION COMPLETE")
 
 
 if __name__ == "__main__":

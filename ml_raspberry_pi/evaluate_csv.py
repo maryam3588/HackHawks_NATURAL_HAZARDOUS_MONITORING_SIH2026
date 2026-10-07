@@ -44,7 +44,7 @@ def main():
 
     results = []
     for hazard, config in C.HAZARDS.items():
-        model_path = args.models / f"{hazard}_v3.joblib"
+        model_path = args.models / f"{hazard}_{C.MODEL_VERSION}.joblib"
         print("\n" + "=" * 70)
         print("HAZARD:", hazard.upper())
         print("=" * 70)

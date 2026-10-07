@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot setup on the Raspberry Pi: venv -> deps -> dataset -> train -> parity test.
+# One-shot setup on the Raspberry Pi: venv -> deps -> dataset -> train -> parity test -> event metrics.
 # Usage: ./run_all.sh            (full dataset, ~5-10 min on a Pi 4)
 #        ./run_all.sh --quick    (small dataset, ~1 min, for a smoke test)
 set -euo pipefail
@@ -19,6 +19,7 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 python3 generate_dataset.py "$@"
 python3 train.py
 python3 test_feature_parity.py
+python3 event_metrics.py --out output/reports/event_metrics.csv
 
 echo
 echo "Done. Start the live service with:"

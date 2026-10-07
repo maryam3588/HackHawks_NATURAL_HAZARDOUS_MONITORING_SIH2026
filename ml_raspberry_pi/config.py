@@ -14,7 +14,8 @@ OUTPUT_DIR = BASE_DIR / "output"
 MODEL_DIR = OUTPUT_DIR / "models"
 REPORT_DIR = OUTPUT_DIR / "reports"
 
-DATA_SOURCE = "synthetic_v3"
+DATA_SOURCE = "synthetic_v4"
+MODEL_VERSION = "v4"
 SAMPLE_INTERVAL_MINUTES = 5
 RANDOM_SEED = 42
 
@@ -29,18 +30,26 @@ MIN_PR_AUC_MARGIN_ABOVE_BASELINE = 0.05
 MAX_FAULT_RECALL_DROP = 0.15
 MAX_OOD_RECALL_DROP = 0.20
 
+# A locked test with fewer disaster episodes than this cannot support a
+# PASS/FAIL verdict; the hazard is reported as INSUFFICIENT_EVENTS instead.
+MIN_TEST_EPISODES = 20
+
 # Hot-day threshold used by hot_window_fraction_1h
 HOT_TEMPERATURE_C = 38.0
 
 DATASET_FILES = {
-    "train": "disaster_v3_train.csv",
-    "calibration": "disaster_v3_calibration.csv",
-    "threshold_validation": "disaster_v3_threshold_validation.csv",
-    "locked_normal": "disaster_v3_locked_normal.csv",
-    "locked_faults": "disaster_v3_locked_faults.csv",
-    "locked_ood": "disaster_v3_locked_ood.csv",
+    "train": "disaster_v4_train.csv",
+    "calibration": "disaster_v4_calibration.csv",
+    "threshold_validation": "disaster_v4_threshold_validation.csv",
+    "locked_normal": "disaster_v4_locked_normal.csv",
+    "locked_faults": "disaster_v4_locked_faults.csv",
+    "locked_ood": "disaster_v4_locked_ood.csv",
 }
-MANIFEST_FILE = "dataset_v3_manifest.csv"
+MANIFEST_FILE = "dataset_v4_manifest.csv"
+
+# A node's history restarts when readings are further apart than this
+# (same rule in training features and on the Pi).
+MAX_GAP_MINUTES = 3 * SAMPLE_INTERVAL_MINUTES
 
 # Raw sensor fields each reading must carry (missing values are allowed
 # and become NaN; HistGradientBoosting handles NaN natively).
