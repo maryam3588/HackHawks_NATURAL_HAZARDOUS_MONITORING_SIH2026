@@ -21,12 +21,25 @@ const state = {
   lastError: null,
 };
 
+// Automatic path: called for every incoming reading, sends at most one per
+// node per SAMPLE_SECONDS.
 async function predict(reading) {
   const nodeId = reading.node_id;
   const now = Date.now();
   if (state.lastSentAt[nodeId] && now - state.lastSentAt[nodeId] < SAMPLE_SECONDS * 1000) {
     return null; // not due yet for this node
   }
+  return send(reading, now);
+}
+
+// "Run ML now" button: send right away and restart this node's 2-minute timer,
+// so the automatic path does not send a second reading a moment later.
+async function predictNow(reading) {
+  return send(reading, Date.now());
+}
+
+async function send(reading, now) {
+  const nodeId = reading.node_id;
   state.lastSentAt[nodeId] = now;
 
   try {
@@ -84,4 +97,4 @@ function latest() {
   return state.latest;
 }
 
-module.exports = { predict, status, latest, SAMPLE_SECONDS };
+module.exports = { predict, predictNow, status, latest, SAMPLE_SECONDS };

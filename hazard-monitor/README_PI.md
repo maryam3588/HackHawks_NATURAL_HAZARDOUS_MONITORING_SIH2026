@@ -83,8 +83,25 @@ cd .. && bash setup.sh
 ```
 `setup.sh` installs the exact scikit-learn version the models need (`ml/output/requirements-pi.txt`).
 
-## ESP32 nodes → Pi
-`POST http://<pi-ip>:3000/api/sensor-data`, header `Content-Type: application/json`
+## The 3 pages
+| page | what it shows |
+|---|---|
+| `http://<pi-ip>:3000/dashboard` | risk cards, ML chance per disaster, "ML MODEL WORKING" badge, charts, **🤖 Run ML now** button |
+| `http://<pi-ip>:3000/esp` | **ESP Live**: every packet as it arrives (saved or rejected + reason), node ONLINE/OFFLINE, packets/minute, sender IP |
+| `http://<pi-ip>:3000/database` | counts, latest readings (filter by node), ML predictions, alerts, ML-dataset preview, CSV downloads |
+
+The ESP Live packet list is kept in memory (last 300) and resets when the server restarts; the readings themselves are in MongoDB.
+
+## 🤖 Run ML now button
+1. Takes every reading each node sent in the **last 2 minutes**.
+2. Combines them into one reading (numbers → average, rain/flame → true if any reading was true) and sends it to the ML model straight away (ignores the 2-minute timer, then restarts it).
+3. Saves the ML result as a prediction (Database page) and appends those raw readings to the **ML dataset** `ml/data/ml_dataset.csv`, with the ML result for that window.
+
+Pressing twice does not store the same reading twice. Download the file from the Database page or `GET /api/ml/dataset.csv`.
+The CSV uses the training column names (`water_level_cm`, `soil_moisture_pct`, …). It has **no label columns**: to use it for re-training or Colab Block 4 scoring with accuracy, add columns such as `flood_within_15m` (1 when a flood really followed). Without labels Block 4 only gives predictions.
+
+## ESP32-S3 nodes → Pi
+`POST http://<pi-ip>:3000/api/sensor-data`, header `Content-Type: application/json`. Watch them arrive on `/esp`.
 
 NODE_01:
 ```json
@@ -94,18 +111,28 @@ NODE_02:
 ```json
 {"node_id":"NODE_02","smoke":120,"flame":false,"temperature":32.1,"humidity":50}
 ```
-The API **rejects (HTTP 400)** anything outside these rules:
+The Pi answers `200` when saved, `400` with `details` listing the reasons when rejected (broken JSON included):
 
 | key | type | allowed |
 |---|---|---|
-| node_id | string | `NODE_01` or `NODE_02` (others are saved but get no risk score) |
+| node_id | string | `NODE_01` or `NODE_02` (others are saved but get no risk score); lower case is upper-cased |
 | water_level, soil_moisture, humidity | number | 0 – 100 |
 | temperature | number | -50 – 60 |
 | tilt | number | -10 – 10 |
 | smoke | number | 0 – 1000 |
-| rain, flame | **true/false** (not 0/1, not mm) | |
+| rain, flame | true/false, 1/0 or "true"/"false" | |
+| optional ML extras | number | `rainfall_mm_h`, `tilt_x_deg`, `tilt_y_deg`, `acceleration_g`, `smoke_raw`, `gas_raw`, `signal_strength`, TinyML `node1_*`/`node2_*` scores and labels |
 
-Keys are snake_case (`water_level`, not `waterLevel`). No timestamp needed — the Pi stamps it.
+Numbers may be sent as text (`"45.2"`). Keys are snake_case. No timestamp needed — the Pi stamps it.
+The optional extras are stored and passed to the ML model; the more of them a node sends, the more of the model's inputs are real (today only 5 of 12 for NODE_01 and 4 of 9 for NODE_02).
+
+### Firmware
+`firmware/esp32s3_node/esp32s3_node.ino` (Arduino IDE):
+1. Boards Manager → install **esp32 by Espressif**; select **ESP32S3 Dev Module**.
+2. Library Manager → **DHT sensor library** (Adafruit) if `USE_DHT22` is 1. The MPU6050 is read with plain `Wire`, no library.
+3. At the top of the file set `WIFI_SSID`, `WIFI_PASSWORD`, `PI_HOST` (the Pi's IP, `hostname -I`), `NODE_ID` (`NODE_01` or `NODE_02`) and the pins.
+4. Upload, open Serial Monitor at 115200: every 5 s it prints the JSON and the Pi's HTTP answer.
+Calibrate `SOIL_ADC_DRY`/`SOIL_ADC_WET` and `SENSOR_HEIGHT_CM` (sensor height above the empty riverbed/tank) for your sensors.
 
 No hardware yet? The dashboard's Simulator buttons generate fake data for both nodes.
 
@@ -121,3 +148,21 @@ Put your Atlas URI in `.env` (`MONGODB_URI=mongodb+srv://...`) **before** `bash 
    ML forwarding and `/api/ml/*` endpoints in `routes/api.js`, the ML badge and ML chance boxes
    in `views/dashboard.ejs`, and the `hazard-ml` service in `setup.sh`.
 6. Risk cards stack to 2 columns on tablets and 1 on phones.
+7. Two more pages (`/esp`, `/database`), the Run ML now button, the ML dataset CSV, ESP32-S3 firmware.
+
+### Bugs found in the original code and fixed
+- A reading of **0** (e.g. `water_level: 0`, `humidity: 0`) was saved as empty (`value || null`), and shown as `--` on the dashboard.
+- Landslide risk ignored **negative tilt** (a slope leaning the other way scored 0).
+- Header always said **"2 Nodes Online"**; it now counts nodes that sent data in the last minute.
+- Node risk % stayed `---%` until an alert fired; now every reading updates it.
+- Charts were empty after a page reload; the last 50 readings are loaded on open.
+- History/training-data endpoints had no limit cap (a big `?limit=` could exhaust the Pi's memory).
+- Broken JSON from a node returned an HTML error page and was not logged; failed saves were not logged.
+
+### Still open (not changed)
+- **No login**: anyone on the same Wi-Fi can post data, start the simulator or press Run ML.
+- `water_level` is limited to 0–100 (cm or %): a deeper tank is rejected.
+- Alerts stay ACTIVE until resolved; they do not clear when the risk drops.
+- The extreme-heat model failed its Colab test: treat its % as advisory.
+- The ML runs every 2 minutes but was trained on 5-minute data.
+- Not yet run on a real Pi, real MongoDB or a real ESP32 (tested with an in-memory database stand-in).

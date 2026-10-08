@@ -256,6 +256,7 @@ printf '\033[1;32m=====================================================\033[0m\n
 printf '  Open on any device on the same Wi-Fi:\n'
 printf '     http://%s:%s\n' "${IP:-<pi-ip>}" "$PORT"
 printf '     http://%s.local:%s\n\n' "$(hostname)" "$PORT"
+printf '  Pages:   /dashboard   /esp (ESP Live)   /database\n\n'
 printf '  ESP32 nodes POST JSON to:\n'
 printf '     http://%s:%s/api/sensor-data\n\n' "${IP:-<pi-ip>}" "$PORT"
 printf '  Logs:     journalctl -u %s -f\n' "$SERVICE"

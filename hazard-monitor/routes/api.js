@@ -6,11 +6,44 @@ const Node = require('../models/Node');
 const Prediction = require('../models/Prediction');
 const riskEngine = require('../services/riskEngine');
 const mlClient = require('../services/mlClient');
+const receiveLog = require('../services/receiveLog');
+const mlDataset = require('../services/mlDataset');
+
+// Extra numeric fields an ESP32 node may send for the ML model. They are not
+// needed by the dashboard; they are stored in SensorReading.extra and passed on.
+const EXTRA_NUMERIC_FIELDS = [
+  'rainfall_mm_h', 'tilt_x_deg', 'tilt_y_deg', 'acceleration_g', 'smoke_raw', 'gas_raw',
+  'node1_flood_score', 'node1_landslide_score', 'node1_flood_label', 'node1_landslide_label',
+  'node2_wildfire_score', 'node2_extreme_heat_score', 'node2_wildfire_label', 'node2_extreme_heat_label',
+];
+const NUMERIC_FIELDS = ['soil_moisture', 'water_level', 'temperature', 'humidity', 'tilt', 'smoke', 'signal_strength',
+  ...EXTRA_NUMERIC_FIELDS];
+const BOOLEAN_FIELDS = ['rain', 'flame'];
+
+// ESP32 firmware often sends 1/0 or "true" for booleans and numbers as text.
+// Convert those to proper types before validating. Anything that cannot be
+// converted is left as it is, so validation reports it.
+const normalizePayload = (body) => {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+  const data = { ...body };
+  if (typeof data.node_id === 'string') data.node_id = data.node_id.trim().toUpperCase();
+  BOOLEAN_FIELDS.forEach((field) => {
+    const value = data[field];
+    if (value === 1 || value === '1' || (typeof value === 'string' && value.trim().toLowerCase() === 'true')) data[field] = true;
+    if (value === 0 || value === '0' || (typeof value === 'string' && value.trim().toLowerCase() === 'false')) data[field] = false;
+  });
+  NUMERIC_FIELDS.forEach((field) => {
+    const value = data[field];
+    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) data[field] = Number(value);
+  });
+  return data;
+};
 
 // VALIDATION HELPER
 const validateSensorData = (data) => {
   const errors = [];
 
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return ['body must be a JSON object'];
   if (!data.node_id) errors.push('node_id required');
   
   // Validate numeric fields
@@ -34,6 +67,12 @@ const validateSensorData = (data) => {
     }
   });
 
+  EXTRA_NUMERIC_FIELDS.forEach((field) => {
+    if (data[field] !== undefined && data[field] !== null && !Number.isFinite(Number(data[field]))) {
+      errors.push(`${field} must be numeric`);
+    }
+  });
+
   // Validate boolean fields
   if (data.rain !== undefined && typeof data.rain !== 'boolean') {
     errors.push('rain must be boolean');
@@ -48,29 +87,39 @@ const validateSensorData = (data) => {
 // POST sensor data
 router.post('/sensor-data', async (req, res) => {
   try {
-    const data = req.body;
+    const data = normalizePayload(req.body);
     const io = req.app.get('io');
 
     // VALIDATION
     const validationErrors = validateSensorData(data);
     if (validationErrors.length > 0) {
-      return res.status(400).json({ 
-        error: 'Validation failed', 
-        details: validationErrors 
+      const packet = receiveLog.record(req, data, { accepted: false, errors: validationErrors });
+      if (io) io.emit('esp-packet', packet);
+      return res.status(400).json({
+        error: 'Validation failed',
+        details: validationErrors
       });
     }
 
-    // Save sensor reading
+    // Extra ML fields the node sent (kept so "Run ML now" can use them later)
+    const extra = {};
+    EXTRA_NUMERIC_FIELDS.forEach((field) => {
+      if (data[field] !== undefined && data[field] !== null) extra[field] = Number(data[field]);
+    });
+
+    // Save sensor reading (?? keeps a real 0 reading; || used to turn 0 into null)
     const reading = new SensorReading({
       node_id: data.node_id,
-      soil_moisture: data.soil_moisture || null,
-      rain: data.rain || false,
-      water_level: data.water_level || null,
-      temperature: data.temperature || null,
-      humidity: data.humidity || null,
-      tilt: data.tilt || null,
-      smoke: data.smoke || null,
-      flame: data.flame || false,
+      soil_moisture: data.soil_moisture ?? null,
+      rain: data.rain ?? false,
+      water_level: data.water_level ?? null,
+      temperature: data.temperature ?? null,
+      humidity: data.humidity ?? null,
+      tilt: data.tilt ?? null,
+      smoke: data.smoke ?? null,
+      flame: data.flame ?? false,
+      signal_strength: data.signal_strength ?? null,
+      extra: Object.keys(extra).length ? extra : undefined,
     });
 
     const savedReading = await reading.save();
@@ -148,6 +197,9 @@ router.post('/sensor-data', async (req, res) => {
         risks: risks
       });
       if (ml) io.emit('ml-update', ml);
+      io.emit('esp-packet', receiveLog.record(req, data, { accepted: true, ml_sent: Boolean(ml) }));
+    } else {
+      receiveLog.record(req, data, { accepted: true, ml_sent: Boolean(ml) });
     }
 
     res.json({
@@ -157,6 +209,10 @@ router.post('/sensor-data', async (req, res) => {
       ml: ml,
     });
   } catch (err) {
+    // e.g. database down: show it on the ESP Live page too
+    const packet = receiveLog.record(req, req.body, { accepted: false, errors: [`server error: ${err.message}`] });
+    const io = req.app.get('io');
+    if (io) io.emit('esp-packet', packet);
     res.status(500).json({ error: err.message });
   }
 });
@@ -180,7 +236,7 @@ router.get('/sensor-data/latest', async (req, res) => {
 router.get('/sensor-data/history', async (req, res) => {
   try {
     const nodeId = req.query.node || 'NODE_01';
-    const limit = parseInt(req.query.limit) || 100;
+    const limit = Math.min(parseInt(req.query.limit) || 100, 5000);
 
     const readings = await SensorReading.find({ node_id: nodeId })
       .sort({ timestamp: -1 })
@@ -271,7 +327,7 @@ router.get('/db-status', async (req, res) => {
 // GET training data for ML (last N readings)
 router.get('/ml/training-data', async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 1000;
+    const limit = Math.min(parseInt(req.query.limit) || 1000, 50000);
     const nodeId = req.query.node;
 
     let query = {};
@@ -295,7 +351,7 @@ router.get('/ml/training-data', async (req, res) => {
 router.get('/ml/predictions', async (req, res) => {
   try {
     const nodeId = req.query.node || 'NODE_01';
-    const limit = parseInt(req.query.limit) || 50;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 1000);
 
     const readings = await SensorReading.find({ node_id: nodeId })
       .sort({ timestamp: -1 })
@@ -353,7 +409,7 @@ router.get('/ml/predictions/history', async (req, res) => {
   try {
     const nodeId = req.query.node;
     const modelType = req.query.model;
-    const limit = parseInt(req.query.limit) || 100;
+    const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
 
     let query = {};
     if (nodeId) query.node_id = nodeId;
@@ -371,6 +427,173 @@ router.get('/ml/predictions/history', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ---------------------------------------------------------------------------
+// RUN ML NOW: combine each node's readings from the last 2 minutes into one
+// reading, send it to the ML model straight away, and add every reading of
+// the window (with the ML result) to the ML dataset CSV.
+// ---------------------------------------------------------------------------
+const RUN_NOW_WINDOW_SECONDS = 120;
+const COMBINE_NUMERIC = ['soil_moisture', 'water_level', 'temperature', 'humidity', 'tilt', 'smoke', 'signal_strength'];
+
+// Averages numeric values, "any true" for rain/flame, the newest timestamp.
+// One combined reading per 2 minutes matches what the model receives
+// automatically; 60 raw readings 2 s apart would distort its time windows.
+function combineReadings(nodeId, readings) {
+  const mean = (values) => {
+    const valid = values.filter((v) => typeof v === 'number' && Number.isFinite(v));
+    return valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : undefined;
+  };
+  const combined = { node_id: nodeId, timestamp: readings[readings.length - 1].timestamp };
+  COMBINE_NUMERIC.forEach((field) => {
+    const value = mean(readings.map((r) => r[field]));
+    if (value !== undefined) combined[field] = value;
+  });
+  combined.rain = readings.some((r) => r.rain === true);
+  combined.flame = readings.some((r) => r.flame === true);
+  EXTRA_NUMERIC_FIELDS.forEach((field) => {
+    const value = mean(readings.map((r) => (r.extra ? r.extra[field] : undefined)));
+    if (value !== undefined) combined[field] = value;
+  });
+  return combined;
+}
+
+router.post('/ml/run-now', async (req, res) => {
+  try {
+    const io = req.app.get('io');
+    const windowEnd = new Date();
+    const windowStart = new Date(windowEnd.getTime() - RUN_NOW_WINDOW_SECONDS * 1000);
+    const runId = `run_${windowEnd.toISOString()}`;
+
+    const readings = await SensorReading.find({ timestamp: { $gte: windowStart } })
+      .sort({ timestamp: 1 })
+      .lean();
+    const byNode = {};
+    readings.forEach((r) => { (byNode[r.node_id] = byNode[r.node_id] || []).push(r); });
+    ['NODE_01', 'NODE_02'].forEach((nodeId) => { byNode[nodeId] = byNode[nodeId] || []; });
+
+    const results = {};
+    for (const [nodeId, nodeReadings] of Object.entries(byNode)) {
+      if (!nodeReadings.length) {
+        results[nodeId] = { readings: 0, ml: null, dataset_rows: 0, message: 'no readings in the last 2 minutes' };
+        continue;
+      }
+      const ml = await mlClient.predictNow(combineReadings(nodeId, nodeReadings));
+      if (ml) {
+        Prediction.create({
+          node_id: nodeId,
+          timestamp: ml.timestamp || windowEnd,
+          model_type: 'hazard_ml_v4_run_now',
+          predictions: ml.hazards,
+          source: 'run_ml_now_button',
+        }).catch((err) => console.error('Prediction save error:', err.message));
+        if (io) io.emit('ml-update', ml);
+      }
+      const dataset = await mlDataset.append(nodeReadings, ml, {
+        run_id: runId,
+        site_id: process.env.SITE_ID || 'pi_site_01',
+        window_start: windowStart.toISOString(),
+        window_end: windowEnd.toISOString(),
+      });
+      results[nodeId] = {
+        readings: nodeReadings.length,
+        ml,
+        dataset_rows: dataset.added,
+        dataset_already_saved: dataset.skipped,
+        message: ml ? 'sent to ML' : `ML not reached: ${(await mlClient.status()).last_error || 'unknown error'}`,
+      };
+    }
+
+    res.json({
+      run_id: runId,
+      window_seconds: RUN_NOW_WINDOW_SECONDS,
+      window_start: windowStart.toISOString(),
+      window_end: windowEnd.toISOString(),
+      results,
+      dataset: await mlDataset.info(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET ML dataset: size + newest rows (Database page)
+router.get('/ml/dataset', async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+  const info = await mlDataset.info();
+  res.json({
+    exists: info.exists,
+    total_rows: info.rows,
+    bytes: info.bytes,
+    updated_at: info.updated_at,
+    columns: mlDataset.HEADER,
+    rows: await mlDataset.preview(limit),
+  });
+});
+
+// GET ML dataset as a CSV file
+router.get('/ml/dataset.csv', (req, res) => {
+  res.download(mlDataset.DATASET_PATH, 'ml_dataset.csv', (err) => {
+    if (err && !res.headersSent) res.status(404).json({ error: 'No ML dataset yet - press "Run ML now" on the dashboard first.' });
+  });
+});
+
+// GET database overview (Database page)
+router.get('/database/overview', async (req, res) => {
+  try {
+    const nodeId = req.query.node;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 1000);
+    const readingQuery = nodeId ? { node_id: nodeId } : {};
+    const [totalReadings, node1Readings, node2Readings, activeAlerts, totalPredictions, readings, alerts, predictions] = await Promise.all([
+      SensorReading.countDocuments(),
+      SensorReading.countDocuments({ node_id: 'NODE_01' }),
+      SensorReading.countDocuments({ node_id: 'NODE_02' }),
+      Alert.countDocuments({ status: 'ACTIVE' }),
+      Prediction.countDocuments(),
+      SensorReading.find(readingQuery).sort({ timestamp: -1 }).limit(limit).lean(),
+      Alert.find().sort({ timestamp: -1 }).limit(50).lean(),
+      Prediction.find().sort({ timestamp: -1 }).limit(50).lean(),
+    ]);
+    res.json({
+      counts: { totalReadings, node1Readings, node2Readings, activeAlerts, totalPredictions },
+      readings,
+      alerts,
+      predictions,
+      dataset: await mlDataset.info(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET all sensor readings as CSV (newest first, up to ?limit=, default 10000)
+router.get('/sensor-data/export.csv', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 10000, 100000);
+    const query = req.query.node ? { node_id: req.query.node } : {};
+    const readings = await SensorReading.find(query).sort({ timestamp: -1 }).limit(limit).lean();
+    const columns = ['timestamp', 'node_id', 'water_level', 'soil_moisture', 'rain', 'temperature', 'humidity',
+      'tilt', 'smoke', 'flame', 'signal_strength', ...EXTRA_NUMERIC_FIELDS];
+    const cell = (v) => {
+      if (v === null || v === undefined) return '';
+      if (v instanceof Date) return v.toISOString();
+      const text = String(v);
+      return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const lines = [columns.join(',')].concat(readings.map((r) => columns.map((c) => cell(
+      r[c] !== undefined ? r[c] : (r.extra ? r.extra[c] : undefined))).join(',')));
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="sensor_readings.csv"');
+    res.send(lines.join('\n') + '\n');
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET live receiver log (ESP Live page)
+router.get('/esp/recent', (req, res) => {
+  res.json(receiveLog.summary());
 });
 
 // GET ML model status (is the ML service connected?)

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Database - Hazard Monitor</title>
+  <link rel="stylesheet" href="/stylesheets/pages.css">
+</head>
+
+<body>
+  <div class="container">
+    <%- include('partials/nav', { active: 'database' }) %>
+
+    <div class="panel">
+      <div class="page-head">
+        <div>
+          <h1>🗄️ Database</h1>
+          <p class="sub">What is stored on the Pi: sensor readings, alerts, ML predictions and the ML dataset.</p>
+        </div>
+        <div class="actions">
+          <span class="sub" id="updated">Loading…</span>
+          <button class="btn light" type="button" id="refresh">↻ Refresh</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="tiles">
+        <div class="tile"><div class="label">Sensor readings</div><div class="value" id="c-total">-</div></div>
+        <div class="tile"><div class="label">NODE_01 readings</div><div class="value" id="c-node1">-</div></div>
+        <div class="tile"><div class="label">NODE_02 readings</div><div class="value" id="c-node2">-</div></div>
+        <div class="tile"><div class="label">Active alerts</div><div class="value" id="c-alerts">-</div></div>
+        <div class="tile"><div class="label">ML predictions</div><div class="value" id="c-pred">-</div></div>
+        <div class="tile"><div class="label">ML dataset rows</div><div class="value" id="c-dataset">-</div></div>
+      </div>
+      <div class="actions" style="margin-top: 16px;">
+        <a class="btn green" href="/api/ml/dataset.csv" id="dl-dataset">⬇ ML dataset CSV</a>
+        <a class="btn" href="/api/sensor-data/export.csv">⬇ All sensor readings CSV</a>
+        <span class="sub">The ML dataset grows each time you press <b>Run ML now</b> on the dashboard.</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="page-head" style="margin-bottom: 12px;">
+        <h2 style="margin: 0;">Latest sensor readings</h2>
+        <label class="sub">Node
+          <select id="node-filter">
+            <option value="">All</option>
+            <option value="NODE_01">NODE_01</option>
+            <option value="NODE_02">NODE_02</option>
+          </select>
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th><th>Node</th><th>Water (cm)</th><th>Soil (%)</th><th>Rain</th><th>Tilt (°)</th>
+              <th>Temp (°C)</th><th>Humidity (%)</th><th>Smoke</th><th>Flame</th><th>RSSI</th><th>Extra ML fields</th>
+            </tr>
+          </thead>
+          <tbody id="readings"><tr><td colspan="12" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>ML predictions</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Time</th><th>Node</th><th>Source</th><th>Flood</th><th>Landslide</th><th>Wildfire</th><th>Extreme heat</th></tr>
+          </thead>
+          <tbody id="predictions"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Alerts (rule-based)</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Time</th><th>Node</th><th>Hazard</th><th>Severity</th><th>Risk score</th><th>Status</th><th>Message</th></tr>
+          </thead>
+          <tbody id="alerts"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>ML dataset (newest rows)</h2>
+      <p class="sub" style="margin-bottom: 10px;">Every reading used by a <b>Run ML now</b> press, with the ML result for its
+        2-minute window. Columns use the training names, so the CSV can be labelled and used in the Colab notebook.</p>
+      <div class="table-wrap">
+        <table>
+          <thead id="dataset-head"></thead>
+          <tbody id="dataset"><tr><td class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const HAZARDS = ['flood', 'landslide', 'wildfire', 'extreme_heat'];
+    const DATASET_COLUMNS = ['timestamp', 'node_id', 'water_level_cm', 'soil_moisture_pct', 'temperature_c', 'humidity_pct',
+      'tilt_x_deg', 'smoke_raw', 'flame', 'rain', 'ml_run_id',
+      'ml_flood_level', 'ml_landslide_level', 'ml_wildfire_level', 'ml_extreme_heat_level'];
+
+    function escapeHtml(text) {
+      return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    const show = (v, digits) => (v === null || v === undefined || v === '') ? '<span class="muted">-</span>'
+      : escapeHtml(typeof v === 'number' && digits !== undefined ? v.toFixed(digits) : v);
+    const yesNo = (v) => (v === true ? 'yes' : v === false ? 'no' : '<span class="muted">-</span>');
+    const time = (iso) => (iso ? new Date(iso).toLocaleString() : '-');
+    const chance = (p) => {
+      if (p === null || p === undefined || p === '') return '-';
+      const pct = Number(p) * 100;
+      return pct < 0.1 ? '<0.1%' : pct < 1 ? pct.toFixed(2) + '%' : pct < 10 ? pct.toFixed(1) + '%' : Math.round(pct) + '%';
+    };
+    const levelPill = (level) => {
+      const cls = { SAFE: 'ok', WATCH: 'warn', WARNING: 'bad' }[level] || '';
+      return level ? `<span class="pill ${cls}">${escapeHtml(level)}</span>` : '<span class="muted">-</span>';
+    };
+
+    function renderReadings(readings) {
+      document.getElementById('readings').innerHTML = readings.length ? readings.map((r) => `<tr>
+        <td class="mono">${time(r.timestamp)}</td><td><b>${escapeHtml(r.node_id)}</b></td>
+        <td class="num">${show(r.water_level, 1)}</td><td class="num">${show(r.soil_moisture, 0)}</td>
+        <td>${yesNo(r.rain)}</td><td class="num">${show(r.tilt, 2)}</td>
+        <td class="num">${show(r.temperature, 1)}</td><td class="num">${show(r.humidity, 0)}</td>
+        <td class="num">${show(r.smoke, 0)}</td><td>${yesNo(r.flame)}</td><td class="num">${show(r.signal_strength)}</td>
+        <td class="wrap mono">${r.extra ? escapeHtml(Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(' ')) : '<span class="muted">-</span>'}</td>
+      </tr>`).join('') : '<tr><td colspan="12" class="empty">No readings stored yet.</td></tr>';
+    }
+
+    function renderPredictions(predictions) {
+      document.getElementById('predictions').innerHTML = predictions.length ? predictions.map((p) => {
+        const cells = HAZARDS.map((h) => {
+          const info = p.predictions && p.predictions[h];
+          if (!info) return '<td class="muted">-</td>';
+          return `<td>${levelPill(info.level)} ${chance(info.probability)}</td>`;
+        }).join('');
+        return `<tr><td class="mono">${time(p.timestamp)}</td><td><b>${escapeHtml(p.node_id)}</b></td>
+          <td>${escapeHtml(p.source || '-')}</td>${cells}</tr>`;
+      }).join('') : '<tr><td colspan="7" class="empty">No ML predictions yet.</td></tr>';
+    }
+
+    function renderAlerts(alerts) {
+      document.getElementById('alerts').innerHTML = alerts.length ? alerts.map((a) => `<tr>
+        <td class="mono">${time(a.timestamp)}</td><td><b>${escapeHtml(a.node_id)}</b></td><td>${escapeHtml(a.hazard)}</td>
+        <td>${escapeHtml(a.severity)}</td><td class="num">${show(a.risk_score, 0)}</td><td>${escapeHtml(a.status)}</td>
+        <td class="wrap">${escapeHtml(a.message || '')}</td></tr>`).join('')
+        : '<tr><td colspan="7" class="empty">No alerts.</td></tr>';
+    }
+
+    function renderDataset(data) {
+      document.getElementById('dataset-head').innerHTML = `<tr>${DATASET_COLUMNS.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr>`;
+      document.getElementById('dataset').innerHTML = data.rows.length ? data.rows.map((row) => `<tr>${DATASET_COLUMNS.map((c) =>
+        c.endsWith('_level') ? `<td>${levelPill(row[c])}</td>` : `<td class="mono">${show(row[c])}</td>`).join('')}</tr>`).join('')
+        : `<tr><td colspan="${DATASET_COLUMNS.length}" class="empty">Empty. Press <b>Run ML now</b> on the dashboard to add rows.</td></tr>`;
+    }
+
+    async function load() {
+      const node = document.getElementById('node-filter').value;
+      try {
+        const [overviewRes, datasetRes] = await Promise.all([
+          fetch(`/api/database/overview?limit=100${node ? `&node=${encodeURIComponent(node)}` : ''}`),
+          fetch('/api/ml/dataset?limit=50'),
+        ]);
+        const overview = await overviewRes.json();
+        const dataset = await datasetRes.json();
+        if (!overviewRes.ok) throw new Error(overview.error || `server answered ${overviewRes.status}`);
+        const c = overview.counts;
+        document.getElementById('c-total').textContent = c.totalReadings;
+        document.getElementById('c-node1').textContent = c.node1Readings;
+        document.getElementById('c-node2').textContent = c.node2Readings;
+        document.getElementById('c-alerts').textContent = c.activeAlerts;
+        document.getElementById('c-pred').textContent = c.totalPredictions;
+        document.getElementById('c-dataset').textContent = overview.dataset.rows;
+        renderReadings(overview.readings);
+        renderPredictions(overview.predictions);
+        renderAlerts(overview.alerts);
+        renderDataset(dataset);
+        document.getElementById('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      } catch (err) {
+        document.getElementById('updated').innerHTML = `<span class="error-text">Could not load: ${escapeHtml(err.message)}</span>`;
+      }
+    }
+
+    document.getElementById('refresh').addEventListener('click', load);
+    document.getElementById('node-filter').addEventListener('change', load);
+    load();
+    setInterval(load, 15000);
+  </script>
+</body>
+
+</html>

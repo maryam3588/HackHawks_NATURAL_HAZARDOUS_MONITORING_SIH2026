@@ -20,6 +20,8 @@ const sensorReadingSchema = new mongoose.Schema({
   smoke: Number,
   flame: Boolean,
   signal_strength: Number,
+  // extra numeric sensor fields for the ML model (rainfall_mm_h, tilt_x_deg, ...)
+  extra: mongoose.Schema.Types.Mixed,
 });
 
 sensorReadingSchema.index({ node_id: 1, timestamp: -1 });

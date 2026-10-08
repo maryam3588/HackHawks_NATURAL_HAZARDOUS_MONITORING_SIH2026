@@ -2,3 +2,4 @@
 node_modules/
 ml/.venv/
 __pycache__/
+ml/data/

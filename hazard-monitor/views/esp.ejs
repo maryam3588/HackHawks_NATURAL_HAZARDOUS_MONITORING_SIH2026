@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP Live - Hazard Monitor</title>
+  <link rel="stylesheet" href="/stylesheets/pages.css">
+</head>
+
+<body>
+  <div class="container">
+    <%- include('partials/nav', { active: 'esp' }) %>
+
+    <div class="panel">
+      <div class="page-head">
+        <div>
+          <h1>📡 ESP Live</h1>
+          <p class="sub">Every packet the Pi receives from the ESP32 nodes, as it arrives.</p>
+        </div>
+        <span class="pill" id="socket-status">Connecting…</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Nodes</h2>
+      <div class="grid" id="node-cards">
+        <p class="empty">No packets received yet.</p>
+      </div>
+      <p class="sub" style="margin-top: 12px;">A node is <b>online</b> if a packet arrived in the last
+        <span id="online-seconds">60</span> seconds. Packet counts reset when the server restarts.</p>
+    </div>
+
+    <div class="panel">
+      <div class="page-head" style="margin-bottom: 12px;">
+        <h2 style="margin: 0;">Packets (newest first)</h2>
+        <label class="sub"><input type="checkbox" id="only-rejected"> only rejected</label>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Node</th>
+              <th>From IP</th>
+              <th>Result</th>
+              <th>Sent to ML</th>
+              <th>Data</th>
+            </tr>
+          </thead>
+          <tbody id="packet-rows">
+            <tr><td colspan="6" class="empty">Waiting for packets…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>How the ESP32 sends data</h2>
+      <p class="sub">POST JSON to <code id="endpoint">http://&lt;pi-ip&gt;:3000/api/sensor-data</code>
+        with header <code>Content-Type: application/json</code>. The Pi answers <code>200</code> when it saved the
+        reading and <code>400</code> with the reasons when it rejected it. Rejected packets appear above in red.</p>
+      <pre class="example">{"node_id":"NODE_01","water_level":45.2,"soil_moisture":60,"rain":false,"temperature":28.5,"humidity":65,"tilt":0.5}
+{"node_id":"NODE_02","smoke":120,"flame":false,"temperature":32.1,"humidity":50}</pre>
+      <p class="sub">Booleans may be <code>true/false</code> or <code>1/0</code>; numbers may be sent as text. Extra ML
+        fields (<code>rainfall_mm_h</code>, <code>tilt_x_deg</code>, <code>tilt_y_deg</code>, <code>acceleration_g</code>,
+        <code>gas_raw</code>, TinyML scores) are stored and passed to the ML model. Firmware:
+        <code>firmware/esp32s3_node/esp32s3_node.ino</code>.</p>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.min.js"></script>
+  <script>
+    const ONLINE_SECONDS = 60;
+    const MAX_ROWS = 150;
+    let packets = [];
+    let nodes = {};
+
+    function escapeHtml(text) {
+      return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function ago(iso) {
+      if (!iso) return 'never';
+      const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+      if (seconds < 60) return `${seconds} s ago`;
+      if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+      return `${Math.floor(seconds / 3600)} h ago`;
+    }
+
+    function payloadText(payload) {
+      if (!payload) return '';
+      const { node_id, ...rest } = payload;
+      return Object.entries(rest).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ');
+    }
+
+    function renderNodes() {
+      const container = document.getElementById('node-cards');
+      const ids = Object.keys(nodes).sort();
+      if (!ids.length) {
+        container.innerHTML = '<p class="empty">No packets received yet.</p>';
+        return;
+      }
+      container.innerHTML = ids.map((id) => {
+        const n = nodes[id];
+        const ageSeconds = n.last_seen ? (Date.now() - new Date(n.last_seen).getTime()) / 1000 : Infinity;
+        const online = ageSeconds <= ONLINE_SECONDS;
+        const last = packets.find((p) => p.node_id === id);
+        return `<div class="node-card">
+          <h3>${escapeHtml(id)} <span class="pill ${online ? 'ok' : 'bad'}">${online ? 'ONLINE' : 'OFFLINE'}</span></h3>
+          <dl class="kv">
+            <dt>Last packet</dt><dd>${ago(n.last_seen)}</dd>
+            <dt>Packets / minute</dt><dd>${n.packets_last_minute ?? 0}</dd>
+            <dt>Accepted</dt><dd>${n.accepted}</dd>
+            <dt>Rejected</dt><dd class="${n.rejected ? 'error-text' : ''}">${n.rejected}</dd>
+            <dt>From IP</dt><dd class="mono">${escapeHtml(n.last_ip || '-')}</dd>
+            <dt>Last data</dt><dd class="mono">${last ? escapeHtml(payloadText(last.payload)) : '-'}</dd>
+          </dl>
+        </div>`;
+      }).join('');
+    }
+
+    function packetRow(p, flash) {
+      const result = p.accepted
+        ? '<span class="pill ok">✔ saved</span>'
+        : `<span class="pill bad">✖ rejected</span><br><span class="error-text">${escapeHtml(p.errors.join('; '))}</span>`;
+      return `<tr class="${p.accepted ? '' : 'rejected'} ${flash ? 'flash' : ''}">
+        <td class="mono">${new Date(p.received_at).toLocaleTimeString()}</td>
+        <td><b>${escapeHtml(p.node_id)}</b></td>
+        <td class="mono">${escapeHtml(p.ip)}</td>
+        <td class="wrap">${result}</td>
+        <td>${p.ml_sent ? '🤖 yes' : '<span class="muted">no</span>'}</td>
+        <td class="wrap mono">${escapeHtml(payloadText(p.payload))}</td>
+      </tr>`;
+    }
+
+    function renderPackets(newestId) {
+      const onlyRejected = document.getElementById('only-rejected').checked;
+      const shown = packets.filter((p) => !onlyRejected || !p.accepted);
+      document.getElementById('packet-rows').innerHTML = shown.length
+        ? shown.map((p) => packetRow(p, p.id === newestId)).join('')
+        : `<tr><td colspan="6" class="empty">${onlyRejected ? 'No rejected packets.' : 'Waiting for packets…'}</td></tr>`;
+    }
+
+    async function loadSummary() {
+      try {
+        const res = await fetch('/api/esp/recent');
+        const data = await res.json();
+        nodes = data.nodes;
+        packets = data.packets;
+        renderNodes();
+        renderPackets();
+      } catch (err) {
+        console.error('ESP summary error:', err);
+      }
+    }
+
+    const socket = io();
+    const status = document.getElementById('socket-status');
+    socket.on('connect', () => { status.textContent = 'LIVE'; status.className = 'pill ok'; });
+    socket.on('disconnect', () => { status.textContent = 'Disconnected from Pi'; status.className = 'pill bad'; });
+
+    socket.on('esp-packet', (packet) => {
+      packets.unshift(packet);
+      if (packets.length > MAX_ROWS) packets.length = MAX_ROWS;
+      if (!packet.payload || typeof packet.payload.node_id !== 'string') { renderPackets(packet.id); return; }
+      const n = nodes[packet.node_id] || (nodes[packet.node_id] = { count: 0, accepted: 0, rejected: 0, packets_last_minute: 0 });
+      n.count += 1;
+      n[packet.accepted ? 'accepted' : 'rejected'] += 1;
+      n.packets_last_minute = (n.packets_last_minute || 0) + 1;
+      n.last_seen = packet.received_at;
+      n.last_ip = packet.ip;
+      renderNodes();
+      renderPackets(packet.id);
+    });
+
+    document.getElementById('only-rejected').addEventListener('change', () => renderPackets());
+    document.getElementById('online-seconds').textContent = ONLINE_SECONDS;
+    document.getElementById('endpoint').textContent = `${location.protocol}//${location.host}/api/sensor-data`;
+
+    loadSummary();
+    setInterval(renderNodes, 5000);     // keep "x s ago" and ONLINE/OFFLINE current
+    setInterval(loadSummary, 30000);    // re-sync packets/minute with the server
+  </script>
+</body>
+
+</html>

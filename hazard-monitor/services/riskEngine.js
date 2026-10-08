@@ -19,9 +19,11 @@ class RiskEngine {
   calculateLandslideRisk(data) {
     let score = 0;
     
-    if (data.tilt > 3) score += 50;
-    else if (data.tilt > 2) score += 35;
-    else if (data.tilt > 1) score += 15;
+    // tilt can lean either way: use its size (-5 deg is as dangerous as +5 deg)
+    const tilt = Math.abs(data.tilt);
+    if (tilt > 3) score += 50;
+    else if (tilt > 2) score += 35;
+    else if (tilt > 1) score += 15;
     
     if (data.soil_moisture > 85) score += 20;
     else if (data.soil_moisture > 70) score += 10;

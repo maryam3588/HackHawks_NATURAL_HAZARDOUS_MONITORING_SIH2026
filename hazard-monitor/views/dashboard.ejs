@@ -604,6 +604,59 @@
       font-weight: 700;
     }
 
+    /* PAGE NAVIGATION + RUN ML NOW */
+    .page-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+
+    .page-nav a {
+      color: white;
+      text-decoration: none;
+      padding: 8px 14px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.18);
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .page-nav a.active {
+      background: white;
+      color: #5a4bb5;
+    }
+
+    .run-ml-btn {
+      padding: 10px 15px;
+      background: linear-gradient(135deg, #2e7d32 0%, #43a047 100%);
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .run-ml-btn:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    .run-ml-result {
+      background: white;
+      border-left: 4px solid #43a047;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin: -15px 0 25px;
+      font-size: 13px;
+      color: #333;
+      line-height: 1.6;
+    }
+
+    .run-ml-result.error {
+      border-left-color: #e53935;
+    }
+
     /* ML service offline: keep the last values visible but clearly old */
     .ml-box.stale {
       opacity: 0.55;
@@ -618,20 +671,36 @@
     @media (max-width: 560px) {
       .risk-summary { grid-template-columns: minmax(0, 1fr); }
     }
+
+    /* Phones and small tablets: stack header, node panels and charts */
+    @media (max-width: 760px) {
+      .header { flex-direction: column; align-items: flex-start; gap: 15px; padding: 20px; }
+      .header-buttons { flex-wrap: wrap; }
+      .nodes, .charts-grid { grid-template-columns: minmax(0, 1fr); }
+      .node-card, .chart-container { min-width: 0; }
+    }
   </style>
 </head>
 
 <body>
   <div class="container">
+    <nav class="page-nav" aria-label="Pages">
+      <a href="/dashboard" class="active">📊 Dashboard</a>
+      <a href="/esp">📡 ESP Live</a>
+      <a href="/database">🗄️ Database</a>
+    </nav>
+
     <!-- HEADER -->
     <div class="header">
       <div>
         <h1>🌍 Environmental Intelligence Network</h1>
-        <p>● <span id="node-count">2</span> Nodes Online <span class="simulator-status" id="sim-status">Offline</span>
+        <p>● <span id="node-count">0</span> Nodes Online <span class="simulator-status" id="sim-status">Offline</span>
           <span class="ml-status checking" id="ml-status" title="Checking the ML model service">ML MODEL: CHECKING…</span>
         </p>
       </div>
       <div class="header-buttons">
+        <button class="run-ml-btn" id="run-ml-btn" onclick="runMlNow()"
+          title="Send each node's last 2 minutes of readings to the ML model now and add them to the ML dataset">🤖 Run ML now</button>
         <button class="alarm-badge" onclick="toggleAlerts()">
           🚨 Alerts
           <span class="badge-count" id="alert-count" style="display: none;">0</span>
@@ -640,6 +709,8 @@
           onclick="checkDatabaseStatus()">📊 DB Status</button>
       </div>
     </div>
+
+    <div class="run-ml-result" id="run-ml-result" hidden></div>
 
     <!-- ALARM OVERLAY (Hidden until HIGH/CRITICAL) -->
     <div class="alert-alarm" id="alarm-overlay">
@@ -953,8 +1024,22 @@
       }
     }
 
+    // Latest rule-based score per card, from each reading's `risks`
+    const RISK_CARDS = { FLOOD: 'node1-flood', LANDSLIDE: 'node1-landslide', FIRE: 'node2-fire', HEAT: 'node2-heat' };
+    const latestRisks = {};
+
+    function severityOf(score) {
+      if (score >= 80) return 'CRITICAL';
+      if (score >= 60) return 'HIGH';
+      if (score >= 40) return 'MEDIUM';
+      return 'LOW';
+    }
+
     // Socket events
     socket.on('sensor-update', (data) => {
+      Object.entries(data.risks || {}).forEach(([hazard, score]) => {
+        if (RISK_CARDS[hazard]) latestRisks[RISK_CARDS[hazard]] = score;
+      });
       if (data.node_id === 'NODE_01') {
         updateNode1(data);
       } else if (data.node_id === 'NODE_02') {
@@ -1047,6 +1132,45 @@
       }
     }
 
+    const HAZARD_NAMES = { flood: 'flood', landslide: 'landslide', wildfire: 'wildfire', extreme_heat: 'heat' };
+
+    async function runMlNow() {
+      const button = document.getElementById('run-ml-btn');
+      const box = document.getElementById('run-ml-result');
+      button.disabled = true;
+      button.textContent = '🤖 Running…';
+      try {
+        const res = await fetch('/api/ml/run-now', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `server answered ${res.status}`);
+        const lines = Object.entries(data.results).map(([node, r]) => {
+          if (!r.readings) return `<b>${escapeHtml(node)}</b>: no readings in the last 2 minutes`;
+          if (!r.ml) return `<b>${escapeHtml(node)}</b>: ${r.readings} readings saved to the dataset, but ${escapeHtml(r.message)}`;
+          const hazards = Object.entries(r.ml.hazards)
+            .map(([h, info]) => `${HAZARD_NAMES[h] || h} ${info.level} (${formatChance(info.probability)})`)
+            .join(', ');
+          const saved = r.dataset_already_saved ? ` · ${r.dataset_rows} new to dataset (${r.dataset_already_saved} already saved)` : '';
+          return `<b>${escapeHtml(node)}</b>: ${r.readings} readings → ${hazards}${saved}`;
+        });
+        const anyFailed = Object.values(data.results).some((r) => r.readings && !r.ml);
+        box.className = anyFailed ? 'run-ml-result error' : 'run-ml-result';
+        box.innerHTML = `🤖 <b>Run ML now</b> · last 2 minutes · ${new Date(data.window_end).toLocaleTimeString()}<br>`
+          + lines.join('<br>')
+          + `<br>ML dataset: ${data.dataset.rows} rows in total (<a href="/database">Database</a> → download CSV)`;
+      } catch (err) {
+        box.className = 'run-ml-result error';
+        box.textContent = `Run ML now failed: ${err.message}`;
+      } finally {
+        box.hidden = false;
+        button.disabled = false;
+        button.textContent = '🤖 Run ML now';
+      }
+    }
+
+    function escapeHtml(text) {
+      return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
     socket.on('ml-update', (result) => {
       renderMl(result);
       setMlStatus(true, `last prediction ${new Date(result.received_at || Date.now()).toLocaleTimeString()}`);
@@ -1063,19 +1187,24 @@
       }
     });
 
+    // A real 0 is a valid reading: only a missing / non-numeric value shows "--"
+    function fmt(value, digits, unit = '') {
+      return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) + unit : '--';
+    }
+
     function updateNode1(data) {
-      document.getElementById('node1-water').textContent = data.water_level ? data.water_level.toFixed(1) + ' cm' : '--';
-      document.getElementById('node1-soil').textContent = data.soil_moisture ? data.soil_moisture.toFixed(0) + ' %' : '--';
+      document.getElementById('node1-water').textContent = fmt(data.water_level, 1, ' cm');
+      document.getElementById('node1-soil').textContent = fmt(data.soil_moisture, 0, ' %');
       document.getElementById('node1-rain').textContent = data.rain ? '🌧 YES' : 'NO';
-      document.getElementById('node1-tilt').textContent = data.tilt ? data.tilt.toFixed(2) + ' °' : '--';
-      document.getElementById('node1-temp').textContent = data.temperature ? data.temperature.toFixed(1) + ' °C' : '--';
-      document.getElementById('node1-humidity').textContent = data.humidity ? data.humidity.toFixed(0) + ' %' : '--';
+      document.getElementById('node1-tilt').textContent = fmt(data.tilt, 2, ' °');
+      document.getElementById('node1-temp').textContent = fmt(data.temperature, 1, ' °C');
+      document.getElementById('node1-humidity').textContent = fmt(data.humidity, 0, ' %');
     }
 
     function updateNode2(data) {
-      document.getElementById('node2-smoke').textContent = data.smoke ? data.smoke.toFixed(0) : '--';
-      document.getElementById('node2-temp').textContent = data.temperature ? data.temperature.toFixed(1) + ' °C' : '--';
-      document.getElementById('node2-humidity').textContent = data.humidity ? data.humidity.toFixed(0) + ' %' : '--';
+      document.getElementById('node2-smoke').textContent = fmt(data.smoke, 0);
+      document.getElementById('node2-temp').textContent = fmt(data.temperature, 1, ' °C');
+      document.getElementById('node2-humidity').textContent = fmt(data.humidity, 0, ' %');
       document.getElementById('node2-flame').textContent = data.flame ? '🔥 DETECTED' : 'NO';
     }
 
@@ -1193,9 +1322,11 @@
         const alertTime = document.getElementById(`${id}-alert-time`);
 
         if (card) {
-          card.className = `risk-card low`;
-          score.textContent = '---%';
-          badge.textContent = 'LOW';
+          const current = latestRisks[id];
+          const severity = current === undefined ? 'LOW' : severityOf(current);
+          card.className = `risk-card ${severity.toLowerCase()}`;
+          score.textContent = current === undefined ? '---%' : Math.round(current) + '%';
+          badge.textContent = severity;
           if (alertLabel) alertLabel.textContent = 'No alert';
           if (alertMsg) alertMsg.textContent = '';
           if (alertTime) alertTime.textContent = '';
@@ -1259,8 +1390,40 @@
     function triggerFire() { socket.emit('simulator:trigger-fire'); }
     function triggerHeat() { socket.emit('simulator:trigger-heat'); }
 
+    // Fill charts and sensor panels from the database on page load
+    async function loadHistory() {
+      for (const nodeId of ['NODE_01', 'NODE_02']) {
+        try {
+          const res = await fetch(`/api/sensor-data/history?node=${nodeId}&limit=50`);
+          const readings = (await res.json()).reverse(); // oldest first
+          readings.forEach(updateCharts);
+          const newest = readings[readings.length - 1];
+          if (newest) (nodeId === 'NODE_01' ? updateNode1 : updateNode2)(newest);
+        } catch (err) {
+          console.error('History load error:', err);
+        }
+      }
+    }
+
+    // "N Nodes Online" = nodes that sent a packet in the last 60 s
+    async function updateNodeCount() {
+      try {
+        const res = await fetch('/api/esp/recent');
+        const data = await res.json();
+        const now = Date.now();
+        const online = Object.values(data.nodes || {})
+          .filter((n) => n.last_seen && now - new Date(n.last_seen).getTime() <= 60000).length;
+        document.getElementById('node-count').textContent = online;
+      } catch (err) {
+        console.error('Node count error:', err);
+      }
+    }
+
     // Initialize
     initCharts();
+    loadHistory();
+    updateNodeCount();
+    setInterval(updateNodeCount, 10000);
     loadAlerts();
     checkMlStatus();
     loadLatestMl();
