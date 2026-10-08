@@ -121,6 +121,12 @@ def main():
             }
         gates = {name: bool(value) for name, value in gates.items()}
         status = "PASS" if all(gates.values()) else "FAIL"
+        positives = int(y_true.sum())
+        if events and events["episodes"] < C.MIN_TEST_EPISODES:
+            # Too few disasters in this file for a verdict (same rule as train.py)
+            status = f"INSUFFICIENT_EVENTS ({events['episodes']})"
+        elif not events and positives == 0:
+            status = "NO_POSITIVE_LABELS"
         print("GATES:", {k: "PASS" if v else "FAIL" for k, v in gates.items()}, "->", status)
 
         results.append({

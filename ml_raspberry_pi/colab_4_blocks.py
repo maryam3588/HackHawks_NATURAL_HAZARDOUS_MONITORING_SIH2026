@@ -3,7 +3,7 @@
 
 # %% BLOCK 1
 # ===== BLOCK 1 - DATA GENERATION =====
-import os, sys, subprocess, pathlib
+import os, sys, glob, shutil, zipfile, subprocess, pathlib
 # Absolute path, so re-running any block (in any order) lands in the same folder
 WORKDIR = "/content/disaster_ml" if os.path.isdir("/content") else os.path.join(os.path.expanduser("~"), "disaster_ml")
 os.makedirs(WORKDIR, exist_ok=True)
@@ -14,24 +14,62 @@ sys.path.insert(0, WORKDIR)
 def write_modules(files):
     for name, source in files.items():
         pathlib.Path(name).write_text(source)
-        print("wrote", name)
+    print("code ready:", ", ".join(files))
 
 
 def run(*args):
-    """Run a module as a script and stream its output into the notebook."""
+    """Run a script and stream its output into the notebook."""
     process = subprocess.Popen([sys.executable, *args], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
     for line in process.stdout:
         print(line, end="")
     if process.wait() != 0:
-        raise RuntimeError(f"{' '.join(args)} failed")
+        raise RuntimeError(" ".join(args) + " failed - see the messages above")
 
 
-def show(dataframe):
+def show(table):
     try:
-        display(dataframe)
+        display(table)
     except NameError:
-        print(dataframe.to_string())
+        print(table.to_string())
+
+
+def get_files(paths, prompt):
+    """Files to use: the given paths, or (empty list) a Colab upload dialog."""
+    if paths:
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            raise FileNotFoundError(f"not found: {missing}")
+        return [os.path.abspath(p) for p in paths]
+    try:
+        from google.colab import files
+    except ImportError:
+        raise RuntimeError(prompt + " - not in Colab, so put the file paths in the list above")
+    print(prompt)
+    return [os.path.abspath(name) for name in files.upload()]
+
+
+def collect_csvs(paths, folder):
+    """Copy CSVs into `folder`; unpack any .zip (nested folders are flattened)."""
+    os.makedirs(folder, exist_ok=True)
+    found = []
+    for path in paths:
+        if path.lower().endswith(".zip"):
+            with zipfile.ZipFile(path) as archive:
+                for member in archive.namelist():
+                    if member.lower().endswith(".csv") and not member.startswith("__MACOSX"):
+                        target = os.path.join(folder, os.path.basename(member))
+                        with archive.open(member) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        found.append(target)
+        elif path.lower().endswith(".csv"):
+            target = os.path.join(folder, os.path.basename(path))
+            if os.path.abspath(path) != os.path.abspath(target):
+                shutil.copy(path, target)
+            found.append(target)
+        else:
+            print("skipped (not .csv or .zip):", path)
+    return found
 
 write_modules({
     'config.py': r'''"""Shared configuration for the Raspberry Pi disaster ML pipeline.
@@ -1181,17 +1219,29 @@ if __name__ == "__main__":
     main()
 ''',
 })
-QUICK = False   # True = small 1-minute smoke-test dataset (its models are too weak to use)
-
-run("generate_dataset.py", *(["--quick"] if QUICK else []))
+DATA_MODE = "generate"   # "generate" or "upload"
+QUICK = False            # generate mode only: True = small smoke-test dataset
+DATASET_FILES = []       # upload mode: leave empty for an upload dialog, or list paths
 
 import pandas as pd
-show(pd.read_csv("data/dataset_v4_manifest.csv"))
+import config
+
+if DATA_MODE == "upload":
+    csvs = collect_csvs(get_files(DATASET_FILES, "Upload the dataset zip(s) or CSV files"), "data")
+    print("dataset files:", sorted(os.path.basename(c) for c in csvs))
+else:
+    run("generate_dataset.py", *(["--quick"] if QUICK else []))
+
+missing = [f for f in config.DATASET_FILES.values() if not os.path.exists(os.path.join("data", f))]
+if missing:
+    print("WARNING - missing dataset files (Block 3 needs them all):", missing)
+if os.path.exists("data/dataset_v4_manifest.csv"):
+    show(pd.read_csv("data/dataset_v4_manifest.csv"))
 
 
 # %% BLOCK 2
 # ===== BLOCK 2 - FEATURE ENGINEERING =====
-import os, sys, subprocess, pathlib
+import os, sys, glob, shutil, zipfile, subprocess, pathlib
 # Absolute path, so re-running any block (in any order) lands in the same folder
 WORKDIR = "/content/disaster_ml" if os.path.isdir("/content") else os.path.join(os.path.expanduser("~"), "disaster_ml")
 os.makedirs(WORKDIR, exist_ok=True)
@@ -1202,26 +1252,327 @@ sys.path.insert(0, WORKDIR)
 def write_modules(files):
     for name, source in files.items():
         pathlib.Path(name).write_text(source)
-        print("wrote", name)
+    print("code ready:", ", ".join(files))
 
 
 def run(*args):
-    """Run a module as a script and stream its output into the notebook."""
+    """Run a script and stream its output into the notebook."""
     process = subprocess.Popen([sys.executable, *args], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
     for line in process.stdout:
         print(line, end="")
     if process.wait() != 0:
-        raise RuntimeError(f"{' '.join(args)} failed")
+        raise RuntimeError(" ".join(args) + " failed - see the messages above")
 
 
-def show(dataframe):
+def show(table):
     try:
-        display(dataframe)
+        display(table)
     except NameError:
-        print(dataframe.to_string())
+        print(table.to_string())
+
+
+def get_files(paths, prompt):
+    """Files to use: the given paths, or (empty list) a Colab upload dialog."""
+    if paths:
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            raise FileNotFoundError(f"not found: {missing}")
+        return [os.path.abspath(p) for p in paths]
+    try:
+        from google.colab import files
+    except ImportError:
+        raise RuntimeError(prompt + " - not in Colab, so put the file paths in the list above")
+    print(prompt)
+    return [os.path.abspath(name) for name in files.upload()]
+
+
+def collect_csvs(paths, folder):
+    """Copy CSVs into `folder`; unpack any .zip (nested folders are flattened)."""
+    os.makedirs(folder, exist_ok=True)
+    found = []
+    for path in paths:
+        if path.lower().endswith(".zip"):
+            with zipfile.ZipFile(path) as archive:
+                for member in archive.namelist():
+                    if member.lower().endswith(".csv") and not member.startswith("__MACOSX"):
+                        target = os.path.join(folder, os.path.basename(member))
+                        with archive.open(member) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        found.append(target)
+        elif path.lower().endswith(".csv"):
+            target = os.path.join(folder, os.path.basename(path))
+            if os.path.abspath(path) != os.path.abspath(target):
+                shutil.copy(path, target)
+            found.append(target)
+        else:
+            print("skipped (not .csv or .zip):", path)
+    return found
 
 write_modules({
+    'config.py': r'''"""Shared configuration for the Raspberry Pi disaster ML pipeline.
+
+Everything that must stay identical between training and on-device
+inference (feature names, window sizes, hazard definitions) lives here.
+"""
+
+import os
+from pathlib import Path
+
+BASE_DIR = Path(os.environ.get("DISASTER_ML_HOME", Path(__file__).resolve().parent))
+
+DATA_DIR = BASE_DIR / "data"
+OUTPUT_DIR = BASE_DIR / "output"
+MODEL_DIR = OUTPUT_DIR / "models"
+REPORT_DIR = OUTPUT_DIR / "reports"
+
+DATA_SOURCE = "synthetic_v4"
+MODEL_VERSION = "v4"
+SAMPLE_INTERVAL_MINUTES = 5
+RANDOM_SEED = 42
+
+# Per-reading targets from the Colab pipeline. Still reported, but no longer
+# used to pick thresholds: with honest "within 15 min" labels they count an
+# alert 45 minutes early as a false positive.
+WATCH_RECALL_TARGET = 0.90
+WARNING_PRECISION_TARGET = 0.70
+
+# Event-level threshold selection (on the threshold-validation set):
+# the most sensitive threshold that stays within a false-alarm budget.
+WARNING_MAX_FALSE_ALARMS = 0.2   # per site per day, i.e. about one false WARNING per site every 5 days
+WATCH_MAX_FALSE_ALARMS = 1.0
+WARNING_MAX_ALERT_TIME = 0.01    # share of non-event time spent in WARNING
+WATCH_MAX_ALERT_TIME = 0.05
+
+# Event-level acceptance gates (on locked tests, WARNING level)
+MIN_DETECTION_RATE = 0.90
+MAX_FALSE_ALARMS_PER_SITE_DAY = 0.5
+MAX_ALERT_TIME_OUTSIDE_EVENTS = 0.02
+MAX_FAULT_DETECTION_DROP = 0.15
+MAX_OOD_DETECTION_DROP = 0.20
+
+# Acceptance gates
+MAX_ECE = 0.15
+MAX_BRIER_SCORE = 0.25
+MIN_PR_AUC_MARGIN_ABOVE_BASELINE = 0.05
+MAX_FAULT_RECALL_DROP = 0.15
+MAX_OOD_RECALL_DROP = 0.20
+
+# A locked test with fewer disaster episodes than this cannot support a
+# PASS/FAIL verdict; the hazard is reported as INSUFFICIENT_EVENTS instead.
+MIN_TEST_EPISODES = 20
+
+# Live alerts need this many consecutive readings over the threshold
+ALERT_CONFIRM_READINGS = 2
+
+# Hot-day threshold used by hot_window_fraction_1h
+HOT_TEMPERATURE_C = 38.0
+
+DATASET_FILES = {
+    "train": "disaster_v4_train.csv",
+    "calibration": "disaster_v4_calibration.csv",
+    "threshold_validation": "disaster_v4_threshold_validation.csv",
+    "locked_normal": "disaster_v4_locked_normal.csv",
+    "locked_faults": "disaster_v4_locked_faults.csv",
+    "locked_ood": "disaster_v4_locked_ood.csv",
+}
+MANIFEST_FILE = "dataset_v4_manifest.csv"
+
+# A node's history restarts when readings are further apart than this
+# (same rule in training features and on the Pi).
+MAX_GAP_MINUTES = 3 * SAMPLE_INTERVAL_MINUTES
+
+# Raw sensor fields each reading must carry (missing values are allowed
+# and become NaN; HistGradientBoosting handles NaN natively).
+RAW_SENSOR_COLUMNS = [
+    "water_level_cm",
+    "rainfall_mm_h",
+    "soil_moisture_pct",
+    "temperature_c",
+    "humidity_pct",
+    "tilt_x_deg",
+    "tilt_y_deg",
+    "acceleration_g",
+    "smoke_raw",
+    "gas_raw",
+    "flame",
+    "node1_flood_score",
+    "node1_landslide_score",
+    "node1_flood_label",
+    "node1_landslide_label",
+    "node2_wildfire_score",
+    "node2_extreme_heat_score",
+    "node2_wildfire_label",
+    "node2_extreme_heat_label",
+]
+
+# node_id, day_of_week and month were dropped from the Colab feature set:
+# each hazard model only ever sees one node (so node_id is constant), and
+# day/month only encode the synthetic sites' start dates, not hazard physics.
+COMMON_FEATURES = [
+    "hour_sin",
+    "hour_cos",
+]
+
+FLOOD_FEATURES = COMMON_FEATURES + [
+    "water_level_cm",
+    "water_level_comp_cm",
+    "rainfall_mm_h",
+    "soil_moisture_pct",
+    "temperature_c",
+    "humidity_pct",
+    "water_level_lag_1",
+    "water_level_lag_3",
+    "water_level_change_1",
+    "water_level_change_3",
+    "water_comp_change_1h",
+    "water_comp_median_15min",
+    "water_comp_std_1h",
+    "water_level_anomaly_cm",
+    "rainfall_15min_sum",
+    "rainfall_1h_sum",
+    "rainfall_3h_sum",
+    "water_level_15min_mean",
+    "water_level_1h_mean",
+    "node1_flood_score",
+    "node1_flood_label",
+]
+
+LANDSLIDE_FEATURES = COMMON_FEATURES + [
+    "rainfall_mm_h",
+    "soil_moisture_pct",
+    "tilt_x_deg",
+    "tilt_y_deg",
+    "tilt_magnitude_deg",
+    "acceleration_g",
+    "acceleration_1h_max",
+    "soil_moisture_lag_1",
+    "soil_moisture_change_1",
+    "soil_moisture_change_1h",
+    "soil_moisture_anomaly",
+    "rainfall_1h_sum",
+    "rainfall_3h_sum",
+    "tilt_change_1",
+    "tilt_change_3",
+    "tilt_change_1h",
+    "tilt_anomaly_deg",
+    "node1_landslide_score",
+    "node1_landslide_label",
+]
+
+WILDFIRE_FEATURES = COMMON_FEATURES + [
+    "temperature_c",
+    "humidity_pct",
+    "smoke_raw",
+    "gas_raw",
+    "flame",
+    "temperature_lag_1",
+    "temperature_change_1",
+    "humidity_lag_1",
+    "humidity_change_1",
+    "smoke_lag_1",
+    "smoke_change_1",
+    "gas_lag_1",
+    "gas_change_1",
+    "smoke_15min_mean",
+    "gas_15min_mean",
+    "smoke_median_15min",
+    "gas_median_15min",
+    "smoke_ratio_24h",
+    "gas_ratio_24h",
+    "smoke_change_1h",
+    "temperature_anomaly_24h",
+    "node2_wildfire_score",
+    "node2_wildfire_label",
+]
+
+EXTREME_HEAT_FEATURES = COMMON_FEATURES + [
+    "temperature_c",
+    "humidity_pct",
+    "temperature_lag_1",
+    "temperature_change_1",
+    "humidity_lag_1",
+    "humidity_change_1",
+    "temperature_1h_mean",
+    "temperature_3h_mean",
+    "temperature_6h_mean",
+    "temperature_6h_max",
+    "temperature_24h_mean",
+    "temperature_anomaly_24h",
+    "temperature_anomaly_72h",
+    "temperature_1h_std",
+    "temperature_change_24h",
+    "humidity_1h_mean",
+    "humidity_change_24h",
+    "hot_window_fraction_1h",
+    "node2_extreme_heat_score",
+    "node2_extreme_heat_label",
+]
+
+HAZARDS = {
+    "flood": {
+        "node_id": "node1",
+        "target": "flood_within_15m",
+        "features": FLOOD_FEATURES,
+    },
+    "landslide": {
+        "node_id": "node1",
+        "target": "landslide_within_15m",
+        "features": LANDSLIDE_FEATURES,
+    },
+    "wildfire": {
+        "node_id": "node2",
+        "target": "wildfire_within_15m",
+        "features": WILDFIRE_FEATURES,
+    },
+    "extreme_heat": {
+        "node_id": "node2",
+        "target": "extreme_heat_within_60m",
+        "features": EXTREME_HEAT_FEATURES,
+    },
+}
+
+TARGET_COLUMNS = [
+    "flood_event",
+    "landslide_event",
+    "wildfire_event",
+    "extreme_heat_event",
+    "flood_within_15m",
+    "landslide_within_15m",
+    "wildfire_within_15m",
+    "extreme_heat_within_60m",
+]
+
+# Rolling windows in samples (5-minute rows)
+WINDOW_15MIN = 4
+WINDOW_1H = 12
+WINDOW_3H = 36
+WINDOW_6H = 72
+WINDOW_24H = 288
+WINDOW_72H = 864
+HISTORY_LENGTH = WINDOW_72H  # longest window the live engine must remember
+
+# Water-level node geometry, used for speed-of-sound compensation. Set these
+# to the real installation: transducer height above the channel bed, and the
+# air temperature the firmware assumes for the speed of sound.
+ULTRASONIC_MOUNT_HEIGHT_CM = 300.0
+ULTRASONIC_ASSUMED_AIR_C = 20.0
+
+# Accept the Node.js dashboard's node ids as aliases
+NODE_ALIASES = {
+    "node1": "node1",
+    "node_01": "node1",
+    "node01": "node1",
+    "node2": "node2",
+    "node_02": "node2",
+    "node02": "node2",
+}
+
+
+def normalise_node_id(node_id):
+    key = str(node_id).strip().lower()
+    return NODE_ALIASES.get(key, key)
+''',
     'features.py': r'''"""Causal feature engineering, in two forms that must agree exactly.
 
 * ``prepare_dataframe``      - vectorised pandas version (training, CSV evaluation)
@@ -1591,22 +1942,27 @@ if __name__ == "__main__":
     main()
 ''',
 })
-import importlib, pandas as pd
+import importlib
+import pandas as pd
 import config, features
-importlib.reload(config); importlib.reload(features)
+importlib.reload(config)
+importlib.reload(features)
 
 for hazard, cfg in config.HAZARDS.items():
     print(f"{hazard:13s} node={cfg['node_id']}  target={cfg['target']}  {len(cfg['features'])} features")
 
-sample = features.prepare_dataframe(pd.read_csv("data/disaster_v4_train.csv", nrows=3000))
+train_csv = os.path.join("data", config.DATASET_FILES["train"])
+if not os.path.exists(train_csv):
+    raise FileNotFoundError("Run Block 1 first (no data/ folder yet)")
+sample = features.prepare_dataframe(pd.read_csv(train_csv, nrows=3000))
 show(sample[["timestamp", "node_id"] + config.FLOOD_FEATURES[:12]].dropna().head(10))
 
-run("test_feature_parity.py")   # training features == live Pi features
+run("test_feature_parity.py", train_csv)   # training features == live Raspberry Pi features
 
 
 # %% BLOCK 3
 # ===== BLOCK 3 - TRAIN =====
-import os, sys, subprocess, pathlib
+import os, sys, glob, shutil, zipfile, subprocess, pathlib
 # Absolute path, so re-running any block (in any order) lands in the same folder
 WORKDIR = "/content/disaster_ml" if os.path.isdir("/content") else os.path.join(os.path.expanduser("~"), "disaster_ml")
 os.makedirs(WORKDIR, exist_ok=True)
@@ -1617,26 +1973,629 @@ sys.path.insert(0, WORKDIR)
 def write_modules(files):
     for name, source in files.items():
         pathlib.Path(name).write_text(source)
-        print("wrote", name)
+    print("code ready:", ", ".join(files))
 
 
 def run(*args):
-    """Run a module as a script and stream its output into the notebook."""
+    """Run a script and stream its output into the notebook."""
     process = subprocess.Popen([sys.executable, *args], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
     for line in process.stdout:
         print(line, end="")
     if process.wait() != 0:
-        raise RuntimeError(f"{' '.join(args)} failed")
+        raise RuntimeError(" ".join(args) + " failed - see the messages above")
 
 
-def show(dataframe):
+def show(table):
     try:
-        display(dataframe)
+        display(table)
     except NameError:
-        print(dataframe.to_string())
+        print(table.to_string())
+
+
+def get_files(paths, prompt):
+    """Files to use: the given paths, or (empty list) a Colab upload dialog."""
+    if paths:
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            raise FileNotFoundError(f"not found: {missing}")
+        return [os.path.abspath(p) for p in paths]
+    try:
+        from google.colab import files
+    except ImportError:
+        raise RuntimeError(prompt + " - not in Colab, so put the file paths in the list above")
+    print(prompt)
+    return [os.path.abspath(name) for name in files.upload()]
+
+
+def collect_csvs(paths, folder):
+    """Copy CSVs into `folder`; unpack any .zip (nested folders are flattened)."""
+    os.makedirs(folder, exist_ok=True)
+    found = []
+    for path in paths:
+        if path.lower().endswith(".zip"):
+            with zipfile.ZipFile(path) as archive:
+                for member in archive.namelist():
+                    if member.lower().endswith(".csv") and not member.startswith("__MACOSX"):
+                        target = os.path.join(folder, os.path.basename(member))
+                        with archive.open(member) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        found.append(target)
+        elif path.lower().endswith(".csv"):
+            target = os.path.join(folder, os.path.basename(path))
+            if os.path.abspath(path) != os.path.abspath(target):
+                shutil.copy(path, target)
+            found.append(target)
+        else:
+            print("skipped (not .csv or .zip):", path)
+    return found
 
 write_modules({
+    'config.py': r'''"""Shared configuration for the Raspberry Pi disaster ML pipeline.
+
+Everything that must stay identical between training and on-device
+inference (feature names, window sizes, hazard definitions) lives here.
+"""
+
+import os
+from pathlib import Path
+
+BASE_DIR = Path(os.environ.get("DISASTER_ML_HOME", Path(__file__).resolve().parent))
+
+DATA_DIR = BASE_DIR / "data"
+OUTPUT_DIR = BASE_DIR / "output"
+MODEL_DIR = OUTPUT_DIR / "models"
+REPORT_DIR = OUTPUT_DIR / "reports"
+
+DATA_SOURCE = "synthetic_v4"
+MODEL_VERSION = "v4"
+SAMPLE_INTERVAL_MINUTES = 5
+RANDOM_SEED = 42
+
+# Per-reading targets from the Colab pipeline. Still reported, but no longer
+# used to pick thresholds: with honest "within 15 min" labels they count an
+# alert 45 minutes early as a false positive.
+WATCH_RECALL_TARGET = 0.90
+WARNING_PRECISION_TARGET = 0.70
+
+# Event-level threshold selection (on the threshold-validation set):
+# the most sensitive threshold that stays within a false-alarm budget.
+WARNING_MAX_FALSE_ALARMS = 0.2   # per site per day, i.e. about one false WARNING per site every 5 days
+WATCH_MAX_FALSE_ALARMS = 1.0
+WARNING_MAX_ALERT_TIME = 0.01    # share of non-event time spent in WARNING
+WATCH_MAX_ALERT_TIME = 0.05
+
+# Event-level acceptance gates (on locked tests, WARNING level)
+MIN_DETECTION_RATE = 0.90
+MAX_FALSE_ALARMS_PER_SITE_DAY = 0.5
+MAX_ALERT_TIME_OUTSIDE_EVENTS = 0.02
+MAX_FAULT_DETECTION_DROP = 0.15
+MAX_OOD_DETECTION_DROP = 0.20
+
+# Acceptance gates
+MAX_ECE = 0.15
+MAX_BRIER_SCORE = 0.25
+MIN_PR_AUC_MARGIN_ABOVE_BASELINE = 0.05
+MAX_FAULT_RECALL_DROP = 0.15
+MAX_OOD_RECALL_DROP = 0.20
+
+# A locked test with fewer disaster episodes than this cannot support a
+# PASS/FAIL verdict; the hazard is reported as INSUFFICIENT_EVENTS instead.
+MIN_TEST_EPISODES = 20
+
+# Live alerts need this many consecutive readings over the threshold
+ALERT_CONFIRM_READINGS = 2
+
+# Hot-day threshold used by hot_window_fraction_1h
+HOT_TEMPERATURE_C = 38.0
+
+DATASET_FILES = {
+    "train": "disaster_v4_train.csv",
+    "calibration": "disaster_v4_calibration.csv",
+    "threshold_validation": "disaster_v4_threshold_validation.csv",
+    "locked_normal": "disaster_v4_locked_normal.csv",
+    "locked_faults": "disaster_v4_locked_faults.csv",
+    "locked_ood": "disaster_v4_locked_ood.csv",
+}
+MANIFEST_FILE = "dataset_v4_manifest.csv"
+
+# A node's history restarts when readings are further apart than this
+# (same rule in training features and on the Pi).
+MAX_GAP_MINUTES = 3 * SAMPLE_INTERVAL_MINUTES
+
+# Raw sensor fields each reading must carry (missing values are allowed
+# and become NaN; HistGradientBoosting handles NaN natively).
+RAW_SENSOR_COLUMNS = [
+    "water_level_cm",
+    "rainfall_mm_h",
+    "soil_moisture_pct",
+    "temperature_c",
+    "humidity_pct",
+    "tilt_x_deg",
+    "tilt_y_deg",
+    "acceleration_g",
+    "smoke_raw",
+    "gas_raw",
+    "flame",
+    "node1_flood_score",
+    "node1_landslide_score",
+    "node1_flood_label",
+    "node1_landslide_label",
+    "node2_wildfire_score",
+    "node2_extreme_heat_score",
+    "node2_wildfire_label",
+    "node2_extreme_heat_label",
+]
+
+# node_id, day_of_week and month were dropped from the Colab feature set:
+# each hazard model only ever sees one node (so node_id is constant), and
+# day/month only encode the synthetic sites' start dates, not hazard physics.
+COMMON_FEATURES = [
+    "hour_sin",
+    "hour_cos",
+]
+
+FLOOD_FEATURES = COMMON_FEATURES + [
+    "water_level_cm",
+    "water_level_comp_cm",
+    "rainfall_mm_h",
+    "soil_moisture_pct",
+    "temperature_c",
+    "humidity_pct",
+    "water_level_lag_1",
+    "water_level_lag_3",
+    "water_level_change_1",
+    "water_level_change_3",
+    "water_comp_change_1h",
+    "water_comp_median_15min",
+    "water_comp_std_1h",
+    "water_level_anomaly_cm",
+    "rainfall_15min_sum",
+    "rainfall_1h_sum",
+    "rainfall_3h_sum",
+    "water_level_15min_mean",
+    "water_level_1h_mean",
+    "node1_flood_score",
+    "node1_flood_label",
+]
+
+LANDSLIDE_FEATURES = COMMON_FEATURES + [
+    "rainfall_mm_h",
+    "soil_moisture_pct",
+    "tilt_x_deg",
+    "tilt_y_deg",
+    "tilt_magnitude_deg",
+    "acceleration_g",
+    "acceleration_1h_max",
+    "soil_moisture_lag_1",
+    "soil_moisture_change_1",
+    "soil_moisture_change_1h",
+    "soil_moisture_anomaly",
+    "rainfall_1h_sum",
+    "rainfall_3h_sum",
+    "tilt_change_1",
+    "tilt_change_3",
+    "tilt_change_1h",
+    "tilt_anomaly_deg",
+    "node1_landslide_score",
+    "node1_landslide_label",
+]
+
+WILDFIRE_FEATURES = COMMON_FEATURES + [
+    "temperature_c",
+    "humidity_pct",
+    "smoke_raw",
+    "gas_raw",
+    "flame",
+    "temperature_lag_1",
+    "temperature_change_1",
+    "humidity_lag_1",
+    "humidity_change_1",
+    "smoke_lag_1",
+    "smoke_change_1",
+    "gas_lag_1",
+    "gas_change_1",
+    "smoke_15min_mean",
+    "gas_15min_mean",
+    "smoke_median_15min",
+    "gas_median_15min",
+    "smoke_ratio_24h",
+    "gas_ratio_24h",
+    "smoke_change_1h",
+    "temperature_anomaly_24h",
+    "node2_wildfire_score",
+    "node2_wildfire_label",
+]
+
+EXTREME_HEAT_FEATURES = COMMON_FEATURES + [
+    "temperature_c",
+    "humidity_pct",
+    "temperature_lag_1",
+    "temperature_change_1",
+    "humidity_lag_1",
+    "humidity_change_1",
+    "temperature_1h_mean",
+    "temperature_3h_mean",
+    "temperature_6h_mean",
+    "temperature_6h_max",
+    "temperature_24h_mean",
+    "temperature_anomaly_24h",
+    "temperature_anomaly_72h",
+    "temperature_1h_std",
+    "temperature_change_24h",
+    "humidity_1h_mean",
+    "humidity_change_24h",
+    "hot_window_fraction_1h",
+    "node2_extreme_heat_score",
+    "node2_extreme_heat_label",
+]
+
+HAZARDS = {
+    "flood": {
+        "node_id": "node1",
+        "target": "flood_within_15m",
+        "features": FLOOD_FEATURES,
+    },
+    "landslide": {
+        "node_id": "node1",
+        "target": "landslide_within_15m",
+        "features": LANDSLIDE_FEATURES,
+    },
+    "wildfire": {
+        "node_id": "node2",
+        "target": "wildfire_within_15m",
+        "features": WILDFIRE_FEATURES,
+    },
+    "extreme_heat": {
+        "node_id": "node2",
+        "target": "extreme_heat_within_60m",
+        "features": EXTREME_HEAT_FEATURES,
+    },
+}
+
+TARGET_COLUMNS = [
+    "flood_event",
+    "landslide_event",
+    "wildfire_event",
+    "extreme_heat_event",
+    "flood_within_15m",
+    "landslide_within_15m",
+    "wildfire_within_15m",
+    "extreme_heat_within_60m",
+]
+
+# Rolling windows in samples (5-minute rows)
+WINDOW_15MIN = 4
+WINDOW_1H = 12
+WINDOW_3H = 36
+WINDOW_6H = 72
+WINDOW_24H = 288
+WINDOW_72H = 864
+HISTORY_LENGTH = WINDOW_72H  # longest window the live engine must remember
+
+# Water-level node geometry, used for speed-of-sound compensation. Set these
+# to the real installation: transducer height above the channel bed, and the
+# air temperature the firmware assumes for the speed of sound.
+ULTRASONIC_MOUNT_HEIGHT_CM = 300.0
+ULTRASONIC_ASSUMED_AIR_C = 20.0
+
+# Accept the Node.js dashboard's node ids as aliases
+NODE_ALIASES = {
+    "node1": "node1",
+    "node_01": "node1",
+    "node01": "node1",
+    "node2": "node2",
+    "node_02": "node2",
+    "node02": "node2",
+}
+
+
+def normalise_node_id(node_id):
+    key = str(node_id).strip().lower()
+    return NODE_ALIASES.get(key, key)
+''',
+    'features.py': r'''"""Causal feature engineering, in two forms that must agree exactly.
+
+* ``prepare_dataframe``      - vectorised pandas version (training, CSV evaluation)
+* ``StreamingFeatureEngine`` - dependency-light version for live readings on
+  the Pi; keeps the last ``HISTORY_LENGTH`` readings per (site, node)
+
+Both are driven by the same specs (``DERIVED``, ``LAGS``, ``ROLLING``), and
+``test_feature_parity.py`` checks they produce the same numbers.
+
+Windows count *readings*. Both versions restart a node's history when the
+gap between readings exceeds ``config.MAX_GAP_MINUTES``.
+"""
+
+import math
+import statistics
+from collections import deque
+from datetime import datetime, timezone
+
+import numpy as np
+
+import config as C
+
+GROUP_COLUMNS = ["site_id", "node_id", "_segment"]
+
+W15, W1H, W3H, W6H, W24H, W72H = (C.WINDOW_15MIN, C.WINDOW_1H, C.WINDOW_3H, C.WINDOW_6H,
+                                  C.WINDOW_24H, C.WINDOW_72H)
+
+# (feature name, source column, steps back); "<name>_change_<k>" features are
+# derived as current minus lag, see CHANGES.
+LAGS = [
+    ("water_level_lag_1", "water_level_cm", 1),
+    ("water_level_lag_3", "water_level_cm", 3),
+    ("soil_moisture_lag_1", "soil_moisture_pct", 1),
+    ("temperature_lag_1", "temperature_c", 1),
+    ("humidity_lag_1", "humidity_pct", 1),
+    ("smoke_lag_1", "smoke_raw", 1),
+    ("gas_lag_1", "gas_raw", 1),
+    ("tilt_lag_1", "tilt_magnitude_deg", 1),
+    ("tilt_lag_3", "tilt_magnitude_deg", 3),
+    ("water_comp_lag_12", "water_level_comp_cm", W1H),
+    ("soil_moisture_lag_12", "soil_moisture_pct", W1H),
+    ("tilt_lag_12", "tilt_magnitude_deg", W1H),
+    ("smoke_median_lag_12", "smoke_median_15min", W1H),
+    # Same time yesterday: removes the day/night cycle for heat waves
+    ("temperature_1h_mean_lag_24h", "temperature_1h_mean", W24H),
+    ("humidity_1h_mean_lag_24h", "humidity_1h_mean", W24H),
+]
+
+# (feature name, column, lag feature)
+CHANGES = [
+    ("water_level_change_1", "water_level_cm", "water_level_lag_1"),
+    ("water_level_change_3", "water_level_cm", "water_level_lag_3"),
+    ("soil_moisture_change_1", "soil_moisture_pct", "soil_moisture_lag_1"),
+    ("temperature_change_1", "temperature_c", "temperature_lag_1"),
+    ("humidity_change_1", "humidity_pct", "humidity_lag_1"),
+    ("smoke_change_1", "smoke_raw", "smoke_lag_1"),
+    ("gas_change_1", "gas_raw", "gas_lag_1"),
+    ("tilt_change_1", "tilt_magnitude_deg", "tilt_lag_1"),
+    ("tilt_change_3", "tilt_magnitude_deg", "tilt_lag_3"),
+    ("water_comp_change_1h", "water_level_comp_cm", "water_comp_lag_12"),
+    ("soil_moisture_change_1h", "soil_moisture_pct", "soil_moisture_lag_12"),
+    ("tilt_change_1h", "tilt_magnitude_deg", "tilt_lag_12"),
+    ("smoke_change_1h", "smoke_median_15min", "smoke_median_lag_12"),
+    ("temperature_change_24h", "temperature_1h_mean", "temperature_1h_mean_lag_24h"),
+    ("humidity_change_24h", "humidity_1h_mean", "humidity_1h_mean_lag_24h"),
+]
+
+# Rolling windows, computed in this order (later specs may use earlier ones).
+# (feature name, column, window, statistic)
+ROLLING_STAGE_1 = [
+    ("rainfall_15min_sum", "rainfall_mm_h", W15, "sum"),
+    ("rainfall_1h_sum", "rainfall_mm_h", W1H, "sum"),
+    ("rainfall_3h_sum", "rainfall_mm_h", W3H, "sum"),
+    ("water_level_15min_mean", "water_level_cm", W15, "mean"),
+    ("water_level_1h_mean", "water_level_cm", W1H, "mean"),
+    ("water_comp_median_15min", "water_level_comp_cm", W15, "median"),
+    ("water_comp_std_1h", "water_level_comp_cm", W1H, "std"),
+    ("soil_moisture_24h_mean", "soil_moisture_pct", W24H, "mean"),
+    ("tilt_24h_median", "tilt_magnitude_deg", W24H, "median"),
+    ("acceleration_1h_max", "acceleration_g", W1H, "max"),
+    ("smoke_15min_mean", "smoke_raw", W15, "mean"),
+    ("gas_15min_mean", "gas_raw", W15, "mean"),
+    ("smoke_median_15min", "smoke_raw", W15, "median"),
+    ("gas_median_15min", "gas_raw", W15, "median"),
+    ("smoke_24h_median", "smoke_raw", W24H, "median"),
+    ("gas_24h_median", "gas_raw", W24H, "median"),
+    ("temperature_1h_mean", "temperature_c", W1H, "mean"),
+    ("temperature_3h_mean", "temperature_c", W3H, "mean"),
+    ("temperature_6h_mean", "temperature_c", W6H, "mean"),
+    ("temperature_6h_max", "temperature_c", W6H, "max"),
+    ("temperature_24h_mean", "temperature_c", W24H, "mean"),
+    ("temperature_72h_mean", "temperature_c", W72H, "mean"),
+    ("temperature_1h_std", "temperature_c", W1H, "std"),
+    ("humidity_1h_mean", "humidity_pct", W1H, "mean"),
+]
+
+# Ratios against a slow baseline cancel per-unit gain and baseline drift of
+# MQ sensors; +10 keeps a disconnected (0) sensor from dividing by zero.
+RATIO_OFFSET = 10.0
+
+
+def _speed_of_sound(temperature_c):
+    return 331.3 + 0.606 * temperature_c
+
+
+def compensate_water_level(level_cm, temperature_c):
+    """Undo the ultrasonic speed-of-sound error using the node's own DHT22."""
+    height = C.ULTRASONIC_MOUNT_HEIGHT_CM
+    factor = _speed_of_sound(temperature_c) / _speed_of_sound(C.ULTRASONIC_ASSUMED_AIR_C)
+    return height - (height - level_cm) * factor
+
+
+def _finish(features):
+    """Features computed from other features (same code for both paths)."""
+    features["water_level_anomaly_cm"] = features["water_comp_median_15min"] - features["water_comp_24h_mean"]
+    features["soil_moisture_anomaly"] = features["soil_moisture_pct"] - features["soil_moisture_24h_mean"]
+    features["tilt_anomaly_deg"] = features["tilt_magnitude_deg"] - features["tilt_24h_median"]
+    features["smoke_ratio_24h"] = (features["smoke_median_15min"] + RATIO_OFFSET) / (
+        features["smoke_24h_median"] + RATIO_OFFSET)
+    features["gas_ratio_24h"] = (features["gas_median_15min"] + RATIO_OFFSET) / (
+        features["gas_24h_median"] + RATIO_OFFSET)
+    features["temperature_anomaly_24h"] = features["temperature_1h_mean"] - features["temperature_24h_mean"]
+    features["temperature_anomaly_72h"] = features["temperature_3h_mean"] - features["temperature_72h_mean"]
+    return features
+
+
+ROLLING_STAGE_2 = [
+    ("water_comp_24h_mean", "water_comp_median_15min", W24H, "mean"),
+]
+
+
+# ----------------------------------------------------------------------
+# Batch (pandas) version
+# ----------------------------------------------------------------------
+
+def prepare_dataframe(dataframe):
+    import pandas as pd
+
+    dataframe = dataframe.copy()
+
+    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"], errors="coerce", utc=True)
+    dataframe = dataframe.dropna(subset=["timestamp", "site_id", "node_id"]).copy()
+    dataframe["site_id"] = dataframe["site_id"].astype(str)
+    dataframe["node_id"] = dataframe["node_id"].map(C.normalise_node_id)
+
+    for column in C.RAW_SENSOR_COLUMNS:
+        if column not in dataframe.columns:
+            dataframe[column] = np.nan
+        dataframe[column] = pd.to_numeric(dataframe[column], errors="coerce")
+
+    dataframe = dataframe.sort_values(["site_id", "node_id", "timestamp"]).reset_index(drop=True)
+
+    for column in C.TARGET_COLUMNS:
+        if column in dataframe.columns:
+            dataframe[column] = pd.to_numeric(dataframe[column], errors="coerce").fillna(0).astype(int).clip(0, 1)
+
+    gap_minutes = (
+        dataframe.groupby(["site_id", "node_id"], sort=False)["timestamp"].diff().dt.total_seconds() / 60
+    )
+    dataframe["_segment"] = (gap_minutes.isna() | (gap_minutes > C.MAX_GAP_MINUTES)).cumsum()
+
+    hour = dataframe["timestamp"].dt.hour
+    dataframe["hour_sin"] = np.sin(2 * np.pi * hour / 24)
+    dataframe["hour_cos"] = np.cos(2 * np.pi * hour / 24)
+    dataframe["tilt_magnitude_deg"] = np.sqrt(dataframe["tilt_x_deg"] ** 2 + dataframe["tilt_y_deg"] ** 2)
+    compensated = compensate_water_level(dataframe["water_level_cm"], dataframe["temperature_c"])
+    dataframe["water_level_comp_cm"] = compensated.fillna(dataframe["water_level_cm"])
+
+    def rolling(column, window, how):
+        grouped = dataframe.groupby(GROUP_COLUMNS, sort=False)[column]
+        result = getattr(grouped.rolling(window=window, min_periods=1), how)()
+        return result.reset_index(level=GROUP_COLUMNS, drop=True)
+
+    for name, column, window, how in ROLLING_STAGE_1 + ROLLING_STAGE_2:
+        dataframe[name] = rolling(column, window, how)
+
+    grouped = dataframe.groupby(GROUP_COLUMNS, sort=False)
+    for name, column, steps in LAGS:
+        dataframe[name] = grouped[column].shift(steps)
+    for name, column, lag in CHANGES:
+        dataframe[name] = dataframe[column] - dataframe[lag]
+
+    # Share of hot readings in the last hour; missing readings count in the
+    # denominator but never as hot, an hour with no valid reading is NaN.
+    dataframe["_hot"] = (dataframe["temperature_c"] >= C.HOT_TEMPERATURE_C).astype(float)
+    dataframe["_valid_temp"] = dataframe["temperature_c"].notna().astype(float)
+    hot_count = rolling("_hot", W1H, "sum")
+    valid_count = rolling("_valid_temp", W1H, "sum")
+    rows_in_window = (dataframe.groupby(GROUP_COLUMNS, sort=False).cumcount() + 1).clip(upper=W1H)
+    dataframe["hot_window_fraction_1h"] = np.where(valid_count > 0, hot_count / rows_in_window, np.nan)
+
+    _finish(dataframe)
+    return dataframe.drop(columns=["_hot", "_valid_temp", "_segment"])
+
+
+def feature_matrix(dataframe, feature_columns):
+    """Float32 matrix in the exact column order the model was trained on."""
+    return dataframe[feature_columns].to_numpy(dtype=np.float32)
+
+
+# ----------------------------------------------------------------------
+# Streaming version for live inference on the Pi
+# ----------------------------------------------------------------------
+
+def _to_float(value):
+    if value is None:
+        return math.nan
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return math.nan
+
+
+def _parse_timestamp(value):
+    if value is None:
+        return datetime.now(timezone.utc)
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
+
+
+def _valid(values):
+    return [v for v in values if not math.isnan(v)]
+
+
+def _stat(values, how):
+    valid = _valid(values)
+    if how == "std":
+        return statistics.stdev(valid) if len(valid) >= 2 else math.nan
+    if not valid:
+        return math.nan
+    if how == "sum":
+        return math.fsum(valid)
+    if how == "mean":
+        return math.fsum(valid) / len(valid)
+    if how == "max":
+        return max(valid)
+    if how == "median":
+        return statistics.median(valid)
+    raise ValueError(how)
+
+
+class StreamingFeatureEngine:
+    """Keeps a rolling history per (site, node) and emits features."""
+
+    def __init__(self, max_gap_minutes=C.MAX_GAP_MINUTES):
+        self.max_gap_minutes = max_gap_minutes
+        self.history = {}
+        self.last_timestamp = {}
+
+    def update(self, reading):
+        """Add one reading (dict) and return (node_id, features dict)."""
+        node_id = C.normalise_node_id(reading.get("node_id", ""))
+        site_id = str(reading.get("site_id", "default_site"))
+        timestamp = _parse_timestamp(reading.get("timestamp"))
+        key = (site_id, node_id)
+
+        previous = self.last_timestamp.get(key)
+        if previous is not None and self.max_gap_minutes is not None:
+            gap = (timestamp - previous).total_seconds() / 60.0
+            if gap < 0 or gap > self.max_gap_minutes:
+                self.history.pop(key, None)
+        self.last_timestamp[key] = timestamp
+
+        row = {column: _to_float(reading.get(column)) for column in C.RAW_SENSOR_COLUMNS}
+        row["tilt_magnitude_deg"] = math.sqrt(row["tilt_x_deg"] ** 2 + row["tilt_y_deg"] ** 2)
+        compensated = compensate_water_level(row["water_level_cm"], row["temperature_c"])
+        row["water_level_comp_cm"] = row["water_level_cm"] if math.isnan(compensated) else compensated
+        hour = timestamp.hour
+        row["hour_sin"] = math.sin(2 * math.pi * hour / 24)
+        row["hour_cos"] = math.cos(2 * math.pi * hour / 24)
+
+        history = self.history.setdefault(key, deque(maxlen=C.HISTORY_LENGTH))
+        history.append(row)
+
+        # Rolling features are stored on the row so later stages (and lags of
+        # rolling features) can read them from history.
+        rows = list(history)
+        for stage in (ROLLING_STAGE_1, ROLLING_STAGE_2):
+            for name, column, window, how in stage:
+                row[name] = _stat([r[column] for r in rows[-window:]], how)
+
+        features = dict(row)
+        for name, column, steps in LAGS:
+            features[name] = rows[-1 - steps][column] if len(rows) > steps else math.nan
+        for name, column, lag in CHANGES:
+            features[name] = features[column] - features[lag]
+
+        temps = [r["temperature_c"] for r in rows[-W1H:]]
+        if all(math.isnan(t) for t in temps):
+            features["hot_window_fraction_1h"] = math.nan
+        else:
+            features["hot_window_fraction_1h"] = sum(1 for t in temps if t >= C.HOT_TEMPERATURE_C) / len(temps)
+
+        return node_id, _finish(features)
+''',
     'metrics.py': r'''"""Classification metrics and WATCH/WARNING threshold selection."""
 
 import numpy as np
@@ -2297,7 +3256,7 @@ show(acceptance[[c for c in [
 
 # %% BLOCK 4
 # ===== BLOCK 4 - TEST =====
-import os, sys, subprocess, pathlib
+import os, sys, glob, shutil, zipfile, subprocess, pathlib
 # Absolute path, so re-running any block (in any order) lands in the same folder
 WORKDIR = "/content/disaster_ml" if os.path.isdir("/content") else os.path.join(os.path.expanduser("~"), "disaster_ml")
 os.makedirs(WORKDIR, exist_ok=True)
@@ -2308,26 +3267,1274 @@ sys.path.insert(0, WORKDIR)
 def write_modules(files):
     for name, source in files.items():
         pathlib.Path(name).write_text(source)
-        print("wrote", name)
+    print("code ready:", ", ".join(files))
 
 
 def run(*args):
-    """Run a module as a script and stream its output into the notebook."""
+    """Run a script and stream its output into the notebook."""
     process = subprocess.Popen([sys.executable, *args], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
     for line in process.stdout:
         print(line, end="")
     if process.wait() != 0:
-        raise RuntimeError(f"{' '.join(args)} failed")
+        raise RuntimeError(" ".join(args) + " failed - see the messages above")
 
 
-def show(dataframe):
+def show(table):
     try:
-        display(dataframe)
+        display(table)
     except NameError:
-        print(dataframe.to_string())
+        print(table.to_string())
+
+
+def get_files(paths, prompt):
+    """Files to use: the given paths, or (empty list) a Colab upload dialog."""
+    if paths:
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            raise FileNotFoundError(f"not found: {missing}")
+        return [os.path.abspath(p) for p in paths]
+    try:
+        from google.colab import files
+    except ImportError:
+        raise RuntimeError(prompt + " - not in Colab, so put the file paths in the list above")
+    print(prompt)
+    return [os.path.abspath(name) for name in files.upload()]
+
+
+def collect_csvs(paths, folder):
+    """Copy CSVs into `folder`; unpack any .zip (nested folders are flattened)."""
+    os.makedirs(folder, exist_ok=True)
+    found = []
+    for path in paths:
+        if path.lower().endswith(".zip"):
+            with zipfile.ZipFile(path) as archive:
+                for member in archive.namelist():
+                    if member.lower().endswith(".csv") and not member.startswith("__MACOSX"):
+                        target = os.path.join(folder, os.path.basename(member))
+                        with archive.open(member) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        found.append(target)
+        elif path.lower().endswith(".csv"):
+            target = os.path.join(folder, os.path.basename(path))
+            if os.path.abspath(path) != os.path.abspath(target):
+                shutil.copy(path, target)
+            found.append(target)
+        else:
+            print("skipped (not .csv or .zip):", path)
+    return found
 
 write_modules({
+    'config.py': r'''"""Shared configuration for the Raspberry Pi disaster ML pipeline.
+
+Everything that must stay identical between training and on-device
+inference (feature names, window sizes, hazard definitions) lives here.
+"""
+
+import os
+from pathlib import Path
+
+BASE_DIR = Path(os.environ.get("DISASTER_ML_HOME", Path(__file__).resolve().parent))
+
+DATA_DIR = BASE_DIR / "data"
+OUTPUT_DIR = BASE_DIR / "output"
+MODEL_DIR = OUTPUT_DIR / "models"
+REPORT_DIR = OUTPUT_DIR / "reports"
+
+DATA_SOURCE = "synthetic_v4"
+MODEL_VERSION = "v4"
+SAMPLE_INTERVAL_MINUTES = 5
+RANDOM_SEED = 42
+
+# Per-reading targets from the Colab pipeline. Still reported, but no longer
+# used to pick thresholds: with honest "within 15 min" labels they count an
+# alert 45 minutes early as a false positive.
+WATCH_RECALL_TARGET = 0.90
+WARNING_PRECISION_TARGET = 0.70
+
+# Event-level threshold selection (on the threshold-validation set):
+# the most sensitive threshold that stays within a false-alarm budget.
+WARNING_MAX_FALSE_ALARMS = 0.2   # per site per day, i.e. about one false WARNING per site every 5 days
+WATCH_MAX_FALSE_ALARMS = 1.0
+WARNING_MAX_ALERT_TIME = 0.01    # share of non-event time spent in WARNING
+WATCH_MAX_ALERT_TIME = 0.05
+
+# Event-level acceptance gates (on locked tests, WARNING level)
+MIN_DETECTION_RATE = 0.90
+MAX_FALSE_ALARMS_PER_SITE_DAY = 0.5
+MAX_ALERT_TIME_OUTSIDE_EVENTS = 0.02
+MAX_FAULT_DETECTION_DROP = 0.15
+MAX_OOD_DETECTION_DROP = 0.20
+
+# Acceptance gates
+MAX_ECE = 0.15
+MAX_BRIER_SCORE = 0.25
+MIN_PR_AUC_MARGIN_ABOVE_BASELINE = 0.05
+MAX_FAULT_RECALL_DROP = 0.15
+MAX_OOD_RECALL_DROP = 0.20
+
+# A locked test with fewer disaster episodes than this cannot support a
+# PASS/FAIL verdict; the hazard is reported as INSUFFICIENT_EVENTS instead.
+MIN_TEST_EPISODES = 20
+
+# Live alerts need this many consecutive readings over the threshold
+ALERT_CONFIRM_READINGS = 2
+
+# Hot-day threshold used by hot_window_fraction_1h
+HOT_TEMPERATURE_C = 38.0
+
+DATASET_FILES = {
+    "train": "disaster_v4_train.csv",
+    "calibration": "disaster_v4_calibration.csv",
+    "threshold_validation": "disaster_v4_threshold_validation.csv",
+    "locked_normal": "disaster_v4_locked_normal.csv",
+    "locked_faults": "disaster_v4_locked_faults.csv",
+    "locked_ood": "disaster_v4_locked_ood.csv",
+}
+MANIFEST_FILE = "dataset_v4_manifest.csv"
+
+# A node's history restarts when readings are further apart than this
+# (same rule in training features and on the Pi).
+MAX_GAP_MINUTES = 3 * SAMPLE_INTERVAL_MINUTES
+
+# Raw sensor fields each reading must carry (missing values are allowed
+# and become NaN; HistGradientBoosting handles NaN natively).
+RAW_SENSOR_COLUMNS = [
+    "water_level_cm",
+    "rainfall_mm_h",
+    "soil_moisture_pct",
+    "temperature_c",
+    "humidity_pct",
+    "tilt_x_deg",
+    "tilt_y_deg",
+    "acceleration_g",
+    "smoke_raw",
+    "gas_raw",
+    "flame",
+    "node1_flood_score",
+    "node1_landslide_score",
+    "node1_flood_label",
+    "node1_landslide_label",
+    "node2_wildfire_score",
+    "node2_extreme_heat_score",
+    "node2_wildfire_label",
+    "node2_extreme_heat_label",
+]
+
+# node_id, day_of_week and month were dropped from the Colab feature set:
+# each hazard model only ever sees one node (so node_id is constant), and
+# day/month only encode the synthetic sites' start dates, not hazard physics.
+COMMON_FEATURES = [
+    "hour_sin",
+    "hour_cos",
+]
+
+FLOOD_FEATURES = COMMON_FEATURES + [
+    "water_level_cm",
+    "water_level_comp_cm",
+    "rainfall_mm_h",
+    "soil_moisture_pct",
+    "temperature_c",
+    "humidity_pct",
+    "water_level_lag_1",
+    "water_level_lag_3",
+    "water_level_change_1",
+    "water_level_change_3",
+    "water_comp_change_1h",
+    "water_comp_median_15min",
+    "water_comp_std_1h",
+    "water_level_anomaly_cm",
+    "rainfall_15min_sum",
+    "rainfall_1h_sum",
+    "rainfall_3h_sum",
+    "water_level_15min_mean",
+    "water_level_1h_mean",
+    "node1_flood_score",
+    "node1_flood_label",
+]
+
+LANDSLIDE_FEATURES = COMMON_FEATURES + [
+    "rainfall_mm_h",
+    "soil_moisture_pct",
+    "tilt_x_deg",
+    "tilt_y_deg",
+    "tilt_magnitude_deg",
+    "acceleration_g",
+    "acceleration_1h_max",
+    "soil_moisture_lag_1",
+    "soil_moisture_change_1",
+    "soil_moisture_change_1h",
+    "soil_moisture_anomaly",
+    "rainfall_1h_sum",
+    "rainfall_3h_sum",
+    "tilt_change_1",
+    "tilt_change_3",
+    "tilt_change_1h",
+    "tilt_anomaly_deg",
+    "node1_landslide_score",
+    "node1_landslide_label",
+]
+
+WILDFIRE_FEATURES = COMMON_FEATURES + [
+    "temperature_c",
+    "humidity_pct",
+    "smoke_raw",
+    "gas_raw",
+    "flame",
+    "temperature_lag_1",
+    "temperature_change_1",
+    "humidity_lag_1",
+    "humidity_change_1",
+    "smoke_lag_1",
+    "smoke_change_1",
+    "gas_lag_1",
+    "gas_change_1",
+    "smoke_15min_mean",
+    "gas_15min_mean",
+    "smoke_median_15min",
+    "gas_median_15min",
+    "smoke_ratio_24h",
+    "gas_ratio_24h",
+    "smoke_change_1h",
+    "temperature_anomaly_24h",
+    "node2_wildfire_score",
+    "node2_wildfire_label",
+]
+
+EXTREME_HEAT_FEATURES = COMMON_FEATURES + [
+    "temperature_c",
+    "humidity_pct",
+    "temperature_lag_1",
+    "temperature_change_1",
+    "humidity_lag_1",
+    "humidity_change_1",
+    "temperature_1h_mean",
+    "temperature_3h_mean",
+    "temperature_6h_mean",
+    "temperature_6h_max",
+    "temperature_24h_mean",
+    "temperature_anomaly_24h",
+    "temperature_anomaly_72h",
+    "temperature_1h_std",
+    "temperature_change_24h",
+    "humidity_1h_mean",
+    "humidity_change_24h",
+    "hot_window_fraction_1h",
+    "node2_extreme_heat_score",
+    "node2_extreme_heat_label",
+]
+
+HAZARDS = {
+    "flood": {
+        "node_id": "node1",
+        "target": "flood_within_15m",
+        "features": FLOOD_FEATURES,
+    },
+    "landslide": {
+        "node_id": "node1",
+        "target": "landslide_within_15m",
+        "features": LANDSLIDE_FEATURES,
+    },
+    "wildfire": {
+        "node_id": "node2",
+        "target": "wildfire_within_15m",
+        "features": WILDFIRE_FEATURES,
+    },
+    "extreme_heat": {
+        "node_id": "node2",
+        "target": "extreme_heat_within_60m",
+        "features": EXTREME_HEAT_FEATURES,
+    },
+}
+
+TARGET_COLUMNS = [
+    "flood_event",
+    "landslide_event",
+    "wildfire_event",
+    "extreme_heat_event",
+    "flood_within_15m",
+    "landslide_within_15m",
+    "wildfire_within_15m",
+    "extreme_heat_within_60m",
+]
+
+# Rolling windows in samples (5-minute rows)
+WINDOW_15MIN = 4
+WINDOW_1H = 12
+WINDOW_3H = 36
+WINDOW_6H = 72
+WINDOW_24H = 288
+WINDOW_72H = 864
+HISTORY_LENGTH = WINDOW_72H  # longest window the live engine must remember
+
+# Water-level node geometry, used for speed-of-sound compensation. Set these
+# to the real installation: transducer height above the channel bed, and the
+# air temperature the firmware assumes for the speed of sound.
+ULTRASONIC_MOUNT_HEIGHT_CM = 300.0
+ULTRASONIC_ASSUMED_AIR_C = 20.0
+
+# Accept the Node.js dashboard's node ids as aliases
+NODE_ALIASES = {
+    "node1": "node1",
+    "node_01": "node1",
+    "node01": "node1",
+    "node2": "node2",
+    "node_02": "node2",
+    "node02": "node2",
+}
+
+
+def normalise_node_id(node_id):
+    key = str(node_id).strip().lower()
+    return NODE_ALIASES.get(key, key)
+''',
+    'features.py': r'''"""Causal feature engineering, in two forms that must agree exactly.
+
+* ``prepare_dataframe``      - vectorised pandas version (training, CSV evaluation)
+* ``StreamingFeatureEngine`` - dependency-light version for live readings on
+  the Pi; keeps the last ``HISTORY_LENGTH`` readings per (site, node)
+
+Both are driven by the same specs (``DERIVED``, ``LAGS``, ``ROLLING``), and
+``test_feature_parity.py`` checks they produce the same numbers.
+
+Windows count *readings*. Both versions restart a node's history when the
+gap between readings exceeds ``config.MAX_GAP_MINUTES``.
+"""
+
+import math
+import statistics
+from collections import deque
+from datetime import datetime, timezone
+
+import numpy as np
+
+import config as C
+
+GROUP_COLUMNS = ["site_id", "node_id", "_segment"]
+
+W15, W1H, W3H, W6H, W24H, W72H = (C.WINDOW_15MIN, C.WINDOW_1H, C.WINDOW_3H, C.WINDOW_6H,
+                                  C.WINDOW_24H, C.WINDOW_72H)
+
+# (feature name, source column, steps back); "<name>_change_<k>" features are
+# derived as current minus lag, see CHANGES.
+LAGS = [
+    ("water_level_lag_1", "water_level_cm", 1),
+    ("water_level_lag_3", "water_level_cm", 3),
+    ("soil_moisture_lag_1", "soil_moisture_pct", 1),
+    ("temperature_lag_1", "temperature_c", 1),
+    ("humidity_lag_1", "humidity_pct", 1),
+    ("smoke_lag_1", "smoke_raw", 1),
+    ("gas_lag_1", "gas_raw", 1),
+    ("tilt_lag_1", "tilt_magnitude_deg", 1),
+    ("tilt_lag_3", "tilt_magnitude_deg", 3),
+    ("water_comp_lag_12", "water_level_comp_cm", W1H),
+    ("soil_moisture_lag_12", "soil_moisture_pct", W1H),
+    ("tilt_lag_12", "tilt_magnitude_deg", W1H),
+    ("smoke_median_lag_12", "smoke_median_15min", W1H),
+    # Same time yesterday: removes the day/night cycle for heat waves
+    ("temperature_1h_mean_lag_24h", "temperature_1h_mean", W24H),
+    ("humidity_1h_mean_lag_24h", "humidity_1h_mean", W24H),
+]
+
+# (feature name, column, lag feature)
+CHANGES = [
+    ("water_level_change_1", "water_level_cm", "water_level_lag_1"),
+    ("water_level_change_3", "water_level_cm", "water_level_lag_3"),
+    ("soil_moisture_change_1", "soil_moisture_pct", "soil_moisture_lag_1"),
+    ("temperature_change_1", "temperature_c", "temperature_lag_1"),
+    ("humidity_change_1", "humidity_pct", "humidity_lag_1"),
+    ("smoke_change_1", "smoke_raw", "smoke_lag_1"),
+    ("gas_change_1", "gas_raw", "gas_lag_1"),
+    ("tilt_change_1", "tilt_magnitude_deg", "tilt_lag_1"),
+    ("tilt_change_3", "tilt_magnitude_deg", "tilt_lag_3"),
+    ("water_comp_change_1h", "water_level_comp_cm", "water_comp_lag_12"),
+    ("soil_moisture_change_1h", "soil_moisture_pct", "soil_moisture_lag_12"),
+    ("tilt_change_1h", "tilt_magnitude_deg", "tilt_lag_12"),
+    ("smoke_change_1h", "smoke_median_15min", "smoke_median_lag_12"),
+    ("temperature_change_24h", "temperature_1h_mean", "temperature_1h_mean_lag_24h"),
+    ("humidity_change_24h", "humidity_1h_mean", "humidity_1h_mean_lag_24h"),
+]
+
+# Rolling windows, computed in this order (later specs may use earlier ones).
+# (feature name, column, window, statistic)
+ROLLING_STAGE_1 = [
+    ("rainfall_15min_sum", "rainfall_mm_h", W15, "sum"),
+    ("rainfall_1h_sum", "rainfall_mm_h", W1H, "sum"),
+    ("rainfall_3h_sum", "rainfall_mm_h", W3H, "sum"),
+    ("water_level_15min_mean", "water_level_cm", W15, "mean"),
+    ("water_level_1h_mean", "water_level_cm", W1H, "mean"),
+    ("water_comp_median_15min", "water_level_comp_cm", W15, "median"),
+    ("water_comp_std_1h", "water_level_comp_cm", W1H, "std"),
+    ("soil_moisture_24h_mean", "soil_moisture_pct", W24H, "mean"),
+    ("tilt_24h_median", "tilt_magnitude_deg", W24H, "median"),
+    ("acceleration_1h_max", "acceleration_g", W1H, "max"),
+    ("smoke_15min_mean", "smoke_raw", W15, "mean"),
+    ("gas_15min_mean", "gas_raw", W15, "mean"),
+    ("smoke_median_15min", "smoke_raw", W15, "median"),
+    ("gas_median_15min", "gas_raw", W15, "median"),
+    ("smoke_24h_median", "smoke_raw", W24H, "median"),
+    ("gas_24h_median", "gas_raw", W24H, "median"),
+    ("temperature_1h_mean", "temperature_c", W1H, "mean"),
+    ("temperature_3h_mean", "temperature_c", W3H, "mean"),
+    ("temperature_6h_mean", "temperature_c", W6H, "mean"),
+    ("temperature_6h_max", "temperature_c", W6H, "max"),
+    ("temperature_24h_mean", "temperature_c", W24H, "mean"),
+    ("temperature_72h_mean", "temperature_c", W72H, "mean"),
+    ("temperature_1h_std", "temperature_c", W1H, "std"),
+    ("humidity_1h_mean", "humidity_pct", W1H, "mean"),
+]
+
+# Ratios against a slow baseline cancel per-unit gain and baseline drift of
+# MQ sensors; +10 keeps a disconnected (0) sensor from dividing by zero.
+RATIO_OFFSET = 10.0
+
+
+def _speed_of_sound(temperature_c):
+    return 331.3 + 0.606 * temperature_c
+
+
+def compensate_water_level(level_cm, temperature_c):
+    """Undo the ultrasonic speed-of-sound error using the node's own DHT22."""
+    height = C.ULTRASONIC_MOUNT_HEIGHT_CM
+    factor = _speed_of_sound(temperature_c) / _speed_of_sound(C.ULTRASONIC_ASSUMED_AIR_C)
+    return height - (height - level_cm) * factor
+
+
+def _finish(features):
+    """Features computed from other features (same code for both paths)."""
+    features["water_level_anomaly_cm"] = features["water_comp_median_15min"] - features["water_comp_24h_mean"]
+    features["soil_moisture_anomaly"] = features["soil_moisture_pct"] - features["soil_moisture_24h_mean"]
+    features["tilt_anomaly_deg"] = features["tilt_magnitude_deg"] - features["tilt_24h_median"]
+    features["smoke_ratio_24h"] = (features["smoke_median_15min"] + RATIO_OFFSET) / (
+        features["smoke_24h_median"] + RATIO_OFFSET)
+    features["gas_ratio_24h"] = (features["gas_median_15min"] + RATIO_OFFSET) / (
+        features["gas_24h_median"] + RATIO_OFFSET)
+    features["temperature_anomaly_24h"] = features["temperature_1h_mean"] - features["temperature_24h_mean"]
+    features["temperature_anomaly_72h"] = features["temperature_3h_mean"] - features["temperature_72h_mean"]
+    return features
+
+
+ROLLING_STAGE_2 = [
+    ("water_comp_24h_mean", "water_comp_median_15min", W24H, "mean"),
+]
+
+
+# ----------------------------------------------------------------------
+# Batch (pandas) version
+# ----------------------------------------------------------------------
+
+def prepare_dataframe(dataframe):
+    import pandas as pd
+
+    dataframe = dataframe.copy()
+
+    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"], errors="coerce", utc=True)
+    dataframe = dataframe.dropna(subset=["timestamp", "site_id", "node_id"]).copy()
+    dataframe["site_id"] = dataframe["site_id"].astype(str)
+    dataframe["node_id"] = dataframe["node_id"].map(C.normalise_node_id)
+
+    for column in C.RAW_SENSOR_COLUMNS:
+        if column not in dataframe.columns:
+            dataframe[column] = np.nan
+        dataframe[column] = pd.to_numeric(dataframe[column], errors="coerce")
+
+    dataframe = dataframe.sort_values(["site_id", "node_id", "timestamp"]).reset_index(drop=True)
+
+    for column in C.TARGET_COLUMNS:
+        if column in dataframe.columns:
+            dataframe[column] = pd.to_numeric(dataframe[column], errors="coerce").fillna(0).astype(int).clip(0, 1)
+
+    gap_minutes = (
+        dataframe.groupby(["site_id", "node_id"], sort=False)["timestamp"].diff().dt.total_seconds() / 60
+    )
+    dataframe["_segment"] = (gap_minutes.isna() | (gap_minutes > C.MAX_GAP_MINUTES)).cumsum()
+
+    hour = dataframe["timestamp"].dt.hour
+    dataframe["hour_sin"] = np.sin(2 * np.pi * hour / 24)
+    dataframe["hour_cos"] = np.cos(2 * np.pi * hour / 24)
+    dataframe["tilt_magnitude_deg"] = np.sqrt(dataframe["tilt_x_deg"] ** 2 + dataframe["tilt_y_deg"] ** 2)
+    compensated = compensate_water_level(dataframe["water_level_cm"], dataframe["temperature_c"])
+    dataframe["water_level_comp_cm"] = compensated.fillna(dataframe["water_level_cm"])
+
+    def rolling(column, window, how):
+        grouped = dataframe.groupby(GROUP_COLUMNS, sort=False)[column]
+        result = getattr(grouped.rolling(window=window, min_periods=1), how)()
+        return result.reset_index(level=GROUP_COLUMNS, drop=True)
+
+    for name, column, window, how in ROLLING_STAGE_1 + ROLLING_STAGE_2:
+        dataframe[name] = rolling(column, window, how)
+
+    grouped = dataframe.groupby(GROUP_COLUMNS, sort=False)
+    for name, column, steps in LAGS:
+        dataframe[name] = grouped[column].shift(steps)
+    for name, column, lag in CHANGES:
+        dataframe[name] = dataframe[column] - dataframe[lag]
+
+    # Share of hot readings in the last hour; missing readings count in the
+    # denominator but never as hot, an hour with no valid reading is NaN.
+    dataframe["_hot"] = (dataframe["temperature_c"] >= C.HOT_TEMPERATURE_C).astype(float)
+    dataframe["_valid_temp"] = dataframe["temperature_c"].notna().astype(float)
+    hot_count = rolling("_hot", W1H, "sum")
+    valid_count = rolling("_valid_temp", W1H, "sum")
+    rows_in_window = (dataframe.groupby(GROUP_COLUMNS, sort=False).cumcount() + 1).clip(upper=W1H)
+    dataframe["hot_window_fraction_1h"] = np.where(valid_count > 0, hot_count / rows_in_window, np.nan)
+
+    _finish(dataframe)
+    return dataframe.drop(columns=["_hot", "_valid_temp", "_segment"])
+
+
+def feature_matrix(dataframe, feature_columns):
+    """Float32 matrix in the exact column order the model was trained on."""
+    return dataframe[feature_columns].to_numpy(dtype=np.float32)
+
+
+# ----------------------------------------------------------------------
+# Streaming version for live inference on the Pi
+# ----------------------------------------------------------------------
+
+def _to_float(value):
+    if value is None:
+        return math.nan
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return math.nan
+
+
+def _parse_timestamp(value):
+    if value is None:
+        return datetime.now(timezone.utc)
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
+
+
+def _valid(values):
+    return [v for v in values if not math.isnan(v)]
+
+
+def _stat(values, how):
+    valid = _valid(values)
+    if how == "std":
+        return statistics.stdev(valid) if len(valid) >= 2 else math.nan
+    if not valid:
+        return math.nan
+    if how == "sum":
+        return math.fsum(valid)
+    if how == "mean":
+        return math.fsum(valid) / len(valid)
+    if how == "max":
+        return max(valid)
+    if how == "median":
+        return statistics.median(valid)
+    raise ValueError(how)
+
+
+class StreamingFeatureEngine:
+    """Keeps a rolling history per (site, node) and emits features."""
+
+    def __init__(self, max_gap_minutes=C.MAX_GAP_MINUTES):
+        self.max_gap_minutes = max_gap_minutes
+        self.history = {}
+        self.last_timestamp = {}
+
+    def update(self, reading):
+        """Add one reading (dict) and return (node_id, features dict)."""
+        node_id = C.normalise_node_id(reading.get("node_id", ""))
+        site_id = str(reading.get("site_id", "default_site"))
+        timestamp = _parse_timestamp(reading.get("timestamp"))
+        key = (site_id, node_id)
+
+        previous = self.last_timestamp.get(key)
+        if previous is not None and self.max_gap_minutes is not None:
+            gap = (timestamp - previous).total_seconds() / 60.0
+            if gap < 0 or gap > self.max_gap_minutes:
+                self.history.pop(key, None)
+        self.last_timestamp[key] = timestamp
+
+        row = {column: _to_float(reading.get(column)) for column in C.RAW_SENSOR_COLUMNS}
+        row["tilt_magnitude_deg"] = math.sqrt(row["tilt_x_deg"] ** 2 + row["tilt_y_deg"] ** 2)
+        compensated = compensate_water_level(row["water_level_cm"], row["temperature_c"])
+        row["water_level_comp_cm"] = row["water_level_cm"] if math.isnan(compensated) else compensated
+        hour = timestamp.hour
+        row["hour_sin"] = math.sin(2 * math.pi * hour / 24)
+        row["hour_cos"] = math.cos(2 * math.pi * hour / 24)
+
+        history = self.history.setdefault(key, deque(maxlen=C.HISTORY_LENGTH))
+        history.append(row)
+
+        # Rolling features are stored on the row so later stages (and lags of
+        # rolling features) can read them from history.
+        rows = list(history)
+        for stage in (ROLLING_STAGE_1, ROLLING_STAGE_2):
+            for name, column, window, how in stage:
+                row[name] = _stat([r[column] for r in rows[-window:]], how)
+
+        features = dict(row)
+        for name, column, steps in LAGS:
+            features[name] = rows[-1 - steps][column] if len(rows) > steps else math.nan
+        for name, column, lag in CHANGES:
+            features[name] = features[column] - features[lag]
+
+        temps = [r["temperature_c"] for r in rows[-W1H:]]
+        if all(math.isnan(t) for t in temps):
+            features["hot_window_fraction_1h"] = math.nan
+        else:
+            features["hot_window_fraction_1h"] = sum(1 for t in temps if t >= C.HOT_TEMPERATURE_C) / len(temps)
+
+        return node_id, _finish(features)
+''',
+    'metrics.py': r'''"""Classification metrics and WATCH/WARNING threshold selection."""
+
+import numpy as np
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    brier_score_loss,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+
+import config as C
+
+
+def expected_calibration_error(y_true, probabilities, n_bins=10):
+    y_true = np.asarray(y_true).astype(int)
+    probabilities = np.asarray(probabilities, dtype=float)
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    bin_ids = np.digitize(probabilities, bins[1:-1], right=True)
+
+    ece_value = 0.0
+    for bin_id in range(n_bins):
+        mask = bin_ids == bin_id
+        if mask.sum() == 0:
+            continue
+        ece_value += mask.mean() * abs(y_true[mask].mean() - probabilities[mask].mean())
+    return float(ece_value)
+
+
+def calculate_classification_metrics(y_true, probabilities, threshold):
+    y_true = np.asarray(y_true).astype(int)
+    probabilities = np.asarray(probabilities, dtype=float)
+    predictions = (probabilities >= threshold).astype(int)
+
+    tn, fp, fn, tp = confusion_matrix(y_true, predictions, labels=[0, 1]).ravel()
+    has_both_classes = len(np.unique(y_true)) == 2
+
+    return {
+        "threshold": float(threshold),
+        "samples": int(len(y_true)),
+        "positive_samples": int(y_true.sum()),
+        "negative_samples": int((y_true == 0).sum()),
+        "accuracy": float(accuracy_score(y_true, predictions)),
+        "precision": float(precision_score(y_true, predictions, zero_division=0)),
+        "recall": float(recall_score(y_true, predictions, zero_division=0)),
+        "f1": float(f1_score(y_true, predictions, zero_division=0)),
+        "pr_auc": float(average_precision_score(y_true, probabilities)) if y_true.sum() else np.nan,
+        "roc_auc": float(roc_auc_score(y_true, probabilities)) if has_both_classes else np.nan,
+        "brier_score": float(brier_score_loss(y_true, probabilities)),
+        "ece": expected_calibration_error(y_true, probabilities),
+        "positive_rate_baseline": float(y_true.mean()),
+        "always_negative_accuracy": float((y_true == 0).mean()),
+        "true_negative": int(tn),
+        "false_positive": int(fp),
+        "false_negative": int(fn),
+        "true_positive": int(tp),
+        "false_positive_rate": float(fp / (fp + tn)) if (fp + tn) else np.nan,
+        "false_negative_rate": float(fn / (fn + tp)) if (fn + tp) else np.nan,
+    }
+
+
+PRINT_KEYS = [
+    "threshold", "accuracy", "precision", "recall", "f1", "pr_auc", "roc_auc",
+    "brier_score", "ece", "true_negative", "false_positive", "false_negative",
+    "true_positive", "false_positive_rate", "false_negative_rate",
+    "always_negative_accuracy",
+]
+
+
+def print_classification_metrics(title, metrics):
+    print("\n" + "-" * 70)
+    print(title)
+    print("-" * 70)
+    for key in PRINT_KEYS:
+        value = metrics[key]
+        print(f"{key}: {value:.4f}" if isinstance(value, float) else f"{key}: {value}")
+
+
+def select_ordered_thresholds(y_true, probabilities):
+    """Same rule as the Colab pipeline.
+
+    WATCH   = highest threshold whose recall >= WATCH_RECALL_TARGET.
+    WARNING = threshold >= WATCH with precision >= WARNING_PRECISION_TARGET
+              and the best recall.
+    When WATCH already meets the precision target this returns
+    WARNING == WATCH (the Colab run hit this for every hazard).
+    The candidate grid runs from 0.0001 to 0.99.
+    """
+    y_true = np.asarray(y_true).astype(int)
+    probabilities = np.asarray(probabilities, dtype=float)
+    # Fine steps below 0.01 too: for rare events the right threshold on a
+    # calibrated probability is often tiny (the Colab grid stopped at 0.01).
+    grid = np.unique(np.round(np.concatenate([np.geomspace(1e-4, 0.01, 41), np.linspace(0.01, 0.99, 99)]), 6))
+
+    def score(threshold):
+        prediction = (probabilities >= threshold).astype(int)
+        return (
+            float(recall_score(y_true, prediction, zero_division=0)),
+            float(precision_score(y_true, prediction, zero_division=0)),
+        )
+
+    scored = [(float(t), *score(t)) for t in grid]
+
+    watch = [s for s in scored if s[1] >= C.WATCH_RECALL_TARGET]
+    if not watch:
+        return {"status": "FAIL", "reason": "No threshold satisfies WATCH recall target."}
+    watch_threshold, watch_recall, watch_precision = max(watch, key=lambda s: (s[0], s[2]))
+
+    warning = [s for s in scored if s[0] >= watch_threshold and s[2] >= C.WARNING_PRECISION_TARGET]
+    if not warning:
+        return {
+            "status": "FAIL",
+            "reason": "No WARNING threshold >= WATCH threshold satisfies precision target.",
+            "watch_threshold": watch_threshold,
+        }
+    warning_threshold, warning_recall, warning_precision = max(warning, key=lambda s: (s[1], -s[0]))
+
+    return {
+        "status": "PASS",
+        "watch_threshold": watch_threshold,
+        "warning_threshold": warning_threshold,
+        "watch_precision": watch_precision,
+        "watch_recall": watch_recall,
+        "warning_precision": warning_precision,
+        "warning_recall": warning_recall,
+    }
+
+
+# ----------------------------------------------------------------------
+# Event-level scoring (what an operator experiences)
+# ----------------------------------------------------------------------
+
+PRECURSOR_PHASES = ("pre_event", "watch", "warning", "event")
+
+
+def runs(mask):
+    """(start, end) index pairs of contiguous True runs."""
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any():
+        return []
+    edges = np.diff(np.concatenate([[0], mask.astype(int), [0]]))
+    return list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
+
+
+def confirm_alerts(raw_alert, confirm):
+    """Alert only after ``confirm`` consecutive readings over the threshold."""
+    raw_alert = np.asarray(raw_alert, dtype=bool)
+    if confirm <= 1:
+        return raw_alert
+    streak = np.zeros(len(raw_alert), dtype=int)
+    for i, value in enumerate(raw_alert):
+        streak[i] = (streak[i - 1] + 1) if (value and i) else int(value)
+    return streak >= confirm
+
+
+def site_groups(subset, hazard):
+    """Precompute per-site arrays used by score_events."""
+    groups = []
+    for _, index in subset.groupby("site_id").indices.items():
+        site = subset.iloc[index]
+        subtype = site["event_subtype"].to_numpy(dtype=str)
+        phase = site["event_phase"].to_numpy(dtype=str)
+        in_hazard = np.char.find(subtype, hazard) >= 0
+        episode_mask = in_hazard & np.isin(phase, PRECURSOR_PHASES)
+        times = site["timestamp"].to_numpy()
+        groups.append({
+            "index": index,
+            "times": times,
+            "phase": phase,
+            "excused": in_hazard,  # episode and its recovery
+            "episodes": runs(episode_mask),
+            "days": (times[-1] - times[0]) / np.timedelta64(1, "D"),
+        })
+    return groups
+
+
+def score_events(groups, probabilities, threshold, confirm=1):
+    """Detection rate, early warning, lead time and false alarms per site-day.
+
+    An episode is one disaster's pre_event..event rows. It is detected if any
+    alert falls inside it. Every separate stretch of alerting outside all
+    episodes and their recoveries is one false alarm, and
+    ``alert_time_outside_events`` is the share of non-event time spent alerting.
+    """
+    episodes = detected = early = false_alarms = false_alert_rows = normal_rows = 0
+    leads = []
+    days = 0.0
+    for group in groups:
+        alert = confirm_alerts(probabilities[group["index"]] >= threshold, confirm)
+        days += group["days"]
+        for start, end in group["episodes"]:
+            episodes += 1
+            hits = np.flatnonzero(alert[start:end])
+            if not len(hits):
+                continue
+            detected += 1
+            event_rows = np.flatnonzero(group["phase"][start:end] == "event")
+            if len(event_rows):
+                lead = (group["times"][start + event_rows[0]] - group["times"][start + hits[0]]) / np.timedelta64(1, "m")
+                leads.append(float(lead))
+                early += lead >= 0
+        # Count alert stretches outside episodes/recoveries. (Counting whole alert
+        # runs that merely touch an episode would let an always-on alarm score
+        # zero false alarms.)
+        outside = alert & ~group["excused"]
+        false_alarms += len(runs(outside))
+        false_alert_rows += int(outside.sum())
+        normal_rows += int((~group["excused"]).sum())
+    return {
+        "episodes": episodes,
+        "detection_rate": detected / episodes if episodes else np.nan,
+        "warned_before_event": early / episodes if episodes else np.nan,
+        "median_lead_min": float(np.median(leads)) if leads else np.nan,
+        "false_alarms_per_site_day": false_alarms / days if days else np.nan,
+        "alert_time_outside_events": false_alert_rows / normal_rows if normal_rows else np.nan,
+    }
+
+
+def select_event_thresholds(groups, probabilities, confirm=1):
+    """WATCH / WARNING = most sensitive thresholds within a false-alarm budget.
+
+    Chosen on the threshold-validation set:
+      WARNING: lowest threshold with <= WARNING_MAX_FALSE_ALARMS per site-day
+               and <= WARNING_MAX_ALERT_TIME of non-event time in alert
+      WATCH:   same with the WATCH budgets, never above WARNING
+    Both limits are needed: counting alarms alone lets an always-on alarm
+    pass (one endless alarm counts once).
+    """
+    grid = np.unique(np.round(np.concatenate([np.geomspace(1e-4, 0.01, 41), np.linspace(0.01, 0.99, 99)]), 6))
+    scored = [(float(t), score_events(groups, probabilities, t, confirm)) for t in grid]
+
+    def lowest_within(max_alarms, max_alert_time):
+        for threshold, score in scored:  # ascending: first is most sensitive
+            if (score["false_alarms_per_site_day"] <= max_alarms
+                    and score["alert_time_outside_events"] <= max_alert_time):
+                return threshold, score
+        return None, None
+
+    warning_threshold, warning_score = lowest_within(C.WARNING_MAX_FALSE_ALARMS, C.WARNING_MAX_ALERT_TIME)
+    if warning_threshold is None:
+        return {"status": "FAIL", "reason": "No threshold keeps WARNING false alarms within budget."}
+    watch_threshold, watch_score = lowest_within(C.WATCH_MAX_FALSE_ALARMS, C.WATCH_MAX_ALERT_TIME)
+    if watch_threshold is None or watch_threshold > warning_threshold:
+        watch_threshold, watch_score = warning_threshold, warning_score
+
+    return {
+        "status": "PASS",
+        "watch_threshold": watch_threshold,
+        "warning_threshold": warning_threshold,
+        "watch_validation": watch_score,
+        "warning_validation": warning_score,
+    }
+''',
+    'train.py': r'''"""Train -> calibrate -> pick thresholds -> locked tests. No forecasting.
+
+Ported from the Colab "complete pipeline" with these changes:
+* forecasting phase removed (all four forecasters scored worse than
+  "repeat the last reading" in the Colab run);
+* reads the files/roles produced by generate_dataset.py;
+* models train on plain float32 arrays (HistGradientBoosting handles NaN
+  itself), so live inference needs no pandas;
+* the calibrator is stored as two floats, so applying it needs no sklearn;
+* the calibrator no longer uses class_weight="balanced", which pulls
+  probabilities towards 50/50 and defeats the point of calibrating;
+* reports are CSV + JSON only (no Excel, no Colab downloads).
+
+Usage:
+    python3 train.py
+    python3 train.py --data data --out output
+"""
+
+import argparse
+import json
+import platform
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
+import sklearn
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+
+import config as C
+from features import feature_matrix, prepare_dataframe
+from metrics import (
+    calculate_classification_metrics,
+    print_classification_metrics,
+    score_events,
+    select_event_thresholds,
+    site_groups,
+)
+
+REQUIRED_COLUMNS = (
+    ["timestamp", "node_id", "site_id", "sensor_status"]
+    + C.RAW_SENSOR_COLUMNS
+    + C.TARGET_COLUMNS
+    + ["dataset_role", "data_source", "event_subtype", "event_phase"]
+)
+
+
+def load_dataset(data_dir, key):
+    path = data_dir / C.DATASET_FILES[key]
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found. Run generate_dataset.py first.")
+
+    header = pd.read_csv(path, nrows=0).columns
+    missing = sorted(set(REQUIRED_COLUMNS) - set(header))
+    if missing:
+        raise ValueError(f"{path.name} is missing columns: {missing}")
+
+    dataframe = pd.read_csv(path, usecols=REQUIRED_COLUMNS)
+
+    roles = set(dataframe["dataset_role"].dropna().astype(str).unique())
+    sources = set(dataframe["data_source"].dropna().astype(str).unique())
+    if roles != {key}:
+        raise ValueError(f"{path.name}: expected role={key}, found {roles}")
+    if sources != {C.DATA_SOURCE}:
+        raise ValueError(f"{path.name}: expected source={C.DATA_SOURCE}, found {sources}")
+
+    print(f"{key}: {len(dataframe)} rows - PASS")
+    return prepare_dataframe(dataframe)
+
+
+def hazard_xy(dataframe, config):
+    subset = dataframe[dataframe["node_id"] == config["node_id"]]
+    return feature_matrix(subset, config["features"]), subset[config["target"]].to_numpy(dtype=int)
+
+
+def hazard_groups(dataframe, config, hazard):
+    return site_groups(dataframe[dataframe["node_id"] == config["node_id"]], hazard)
+
+
+def count_episodes(dataframe, config):
+    """Number of separate warning episodes (0 -> 1 transitions per site)."""
+    subset = dataframe[dataframe["node_id"] == config["node_id"]]
+    target = subset[config["target"]]
+    previous = target.groupby(subset["site_id"]).shift(1).fillna(0)
+    return int(((target == 1) & (previous == 0)).sum())
+
+
+def fit_calibrator(raw_probabilities, y_true):
+    inputs = np.clip(raw_probabilities, 1e-6, 1 - 1e-6).reshape(-1, 1)
+    model = LogisticRegression(max_iter=1000, random_state=C.RANDOM_SEED)
+    model.fit(inputs, y_true)
+    return {"coef": float(model.coef_[0, 0]), "intercept": float(model.intercept_[0])}
+
+
+def apply_calibrator(calibrator, raw_probabilities):
+    inputs = np.clip(np.asarray(raw_probabilities, dtype=float), 1e-6, 1 - 1e-6)
+    return 1.0 / (1.0 + np.exp(-(calibrator["coef"] * inputs + calibrator["intercept"])))
+
+
+def tag(metrics, **extra):
+    metrics.update(extra)
+    metrics["data_source"] = C.DATA_SOURCE
+    return metrics
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--data", type=Path, default=C.DATA_DIR)
+    parser.add_argument("--out", type=Path, default=C.OUTPUT_DIR)
+    parser.add_argument("--max-iter", type=int, default=250, help="boosting iterations per model")
+    args = parser.parse_args()
+
+    model_dir = args.out / "models"
+    report_dir = args.out / "reports"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    started = time.time()
+    print("=" * 90)
+    print("DISASTER PIPELINE: TRAIN -> CALIBRATION -> THRESHOLDS -> LOCKED TESTS")
+    print("=" * 90)
+
+    base_rows, calibration_rows, threshold_rows, locked_rows, acceptance_rows = [], [], [], [], []
+    candidates = {}
+
+    # Datasets are loaded one phase at a time and freed afterwards so the
+    # whole pipeline fits in a Raspberry Pi's RAM.
+
+    # ---- Phase 1: base classifiers --------------------------------------
+    print("\nPHASE 1: BASE CLASSIFIERS")
+    train_df = load_dataset(args.data, "train")
+    models = {}
+    for hazard, config in C.HAZARDS.items():
+        X_train, y_train = hazard_xy(train_df, config)
+        model = HistGradientBoostingClassifier(
+            learning_rate=0.05,
+            max_iter=args.max_iter,
+            max_leaf_nodes=15,
+            l2_regularization=1.5,
+            early_stopping=True,
+            validation_fraction=0.15,
+            random_state=C.RANDOM_SEED,
+        )
+        model.fit(X_train, y_train)
+        models[hazard] = model
+        version = f"{hazard}_{C.MODEL_VERSION}"
+
+        train_metrics = calculate_classification_metrics(y_train, model.predict_proba(X_train)[:, 1], 0.50)
+        print_classification_metrics(f"{hazard.upper()} BASE TRAIN (iterations used: {model.n_iter_})", train_metrics)
+        base_rows.append(tag(train_metrics, hazard=hazard, stage="BASE_TRAIN", dataset="train",
+                             model_version=version, episodes=count_episodes(train_df, config)))
+    del train_df
+
+    # ---- Phase 2: calibration + ordered thresholds ----------------------
+    print("\nPHASE 2: CALIBRATION + ORDERED THRESHOLDS")
+    calibration_df = load_dataset(args.data, "calibration")
+    threshold_df = load_dataset(args.data, "threshold_validation")
+    for hazard, config in C.HAZARDS.items():
+        model = models[hazard]
+        version = f"{hazard}_{C.MODEL_VERSION}"
+        X_cal, y_cal = hazard_xy(calibration_df, config)
+        X_thr, y_thr = hazard_xy(threshold_df, config)
+
+        empty = [name for name, y in [("calibration", y_cal), ("threshold_validation", y_thr)]
+                 if len(np.unique(y)) < 2]
+        if empty:
+            reason = f"no positive (or no negative) rows in: {', '.join(empty)} - generate more data"
+            print(f"{hazard.upper()} CANNOT CALIBRATE:", reason)
+            acceptance_rows.append({"hazard": hazard, "candidate_status": "FAIL", "reason": reason})
+            continue
+
+        calibrator = fit_calibrator(model.predict_proba(X_cal)[:, 1], y_cal)
+        cal_metrics = calculate_classification_metrics(
+            y_cal, apply_calibrator(calibrator, model.predict_proba(X_cal)[:, 1]), 0.50
+        )
+        print_classification_metrics(f"{hazard.upper()} CALIBRATION", cal_metrics)
+        calibration_rows.append(tag(cal_metrics, hazard=hazard, stage="CALIBRATION", dataset="calibration",
+                                    model_version=version, episodes=count_episodes(calibration_df, config)))
+
+        thr_probabilities = apply_calibrator(calibrator, model.predict_proba(X_thr)[:, 1])
+        selection = select_event_thresholds(hazard_groups(threshold_df, config, hazard), thr_probabilities,
+                                            C.ALERT_CONFIRM_READINGS)
+        if selection["status"] == "FAIL":
+            print(f"{hazard.upper()} THRESHOLD SELECTION FAILED:", selection["reason"])
+            acceptance_rows.append({"hazard": hazard, "candidate_status": "FAIL", "reason": selection["reason"]})
+            continue
+
+        watch_threshold = selection["watch_threshold"]
+        warning_threshold = selection["warning_threshold"]
+        print(f"{hazard.upper()} thresholds: WATCH>={watch_threshold:.4f} WARNING>={warning_threshold:.4f} "
+              f"(validation WARNING: {selection['warning_validation']})")
+        if watch_threshold == warning_threshold:
+            print(f"NOTE: {hazard} WATCH and WARNING thresholds are identical;"
+                  " the two alert tiers will always fire together.")
+
+        for stage, threshold in [("WATCH", watch_threshold), ("WARNING", warning_threshold)]:
+            stage_metrics = calculate_classification_metrics(y_thr, thr_probabilities, threshold)
+            print_classification_metrics(f"{hazard.upper()} THRESHOLD VALIDATION {stage}", stage_metrics)
+            threshold_rows.append(tag(stage_metrics, hazard=hazard, stage=stage, dataset="threshold_validation",
+                                      model_version=version, episodes=count_episodes(threshold_df, config)))
+
+        candidates[hazard] = {
+            "model": model,
+            "calibrator": calibrator,
+            "watch_threshold": watch_threshold,
+            "warning_threshold": warning_threshold,
+            "version": version,
+        }
+    del calibration_df, threshold_df
+
+    # ---- Phase 3: locked tests ------------------------------------------
+    print("\nPHASE 3: LOCKED TESTS")
+    results = {hazard: {} for hazard in candidates}
+    for test_name in ["locked_normal", "locked_faults", "locked_ood"]:
+        test_df = load_dataset(args.data, test_name)
+        for hazard, candidate in candidates.items():
+            config = C.HAZARDS[hazard]
+            X_test, y_test = hazard_xy(test_df, config)
+            episodes = count_episodes(test_df, config)
+            probabilities = apply_calibrator(candidate["calibrator"], candidate["model"].predict_proba(X_test)[:, 1])
+            results[hazard][test_name] = {"episodes": episodes}
+            groups = hazard_groups(test_df, config, hazard)
+            for stage in ["WATCH", "WARNING"]:
+                threshold = candidate[f"{stage.lower()}_threshold"]
+                stage_metrics = calculate_classification_metrics(y_test, probabilities, threshold)
+                events = score_events(groups, probabilities, threshold, C.ALERT_CONFIRM_READINGS)
+                stage_metrics.update({f"event_{k}": v for k, v in events.items()})
+                print(f"{hazard.upper()} {test_name} {stage}: {events}")
+                print_classification_metrics(f"{hazard.upper()} {test_name.upper()} {stage} ({episodes} episodes)",
+                                             stage_metrics)
+                results[hazard][test_name][stage] = stage_metrics
+                locked_rows.append(tag(dict(stage_metrics), hazard=hazard, stage=stage, dataset=test_name,
+                                       model_version=candidate["version"], episodes=episodes))
+        del test_df
+
+    # ---- Acceptance gates + model export --------------------------------
+    print("\nACCEPTANCE")
+    registry = []
+    for hazard, config in C.HAZARDS.items():
+        model_path = model_dir / f"{hazard}_{C.MODEL_VERSION}.joblib"
+        candidate = candidates.get(hazard)
+        if candidate is None:
+            # Never leave a model from an earlier run behind for a hazard that now fails
+            model_path.unlink(missing_ok=True)
+            continue
+
+        res = results[hazard]
+        normal_watch = res["locked_normal"]["WATCH"]
+        normal_warning = res["locked_normal"]["WARNING"]
+        detection = {name: res[name]["WARNING"]["event_detection_rate"] for name in res}
+        fault_detection_drop = detection["locked_normal"] - detection["locked_faults"]
+        ood_detection_drop = detection["locked_normal"] - detection["locked_ood"]
+        min_episodes = min(res[name]["episodes"] for name in res)
+
+        # Event-level gates decide PASS/FAIL. The per-reading Colab gates are
+        # kept as row_* columns for reference.
+        gates = {
+            "ordered_thresholds_pass": candidate["watch_threshold"] <= candidate["warning_threshold"],
+            "detection_rate_pass": detection["locked_normal"] >= C.MIN_DETECTION_RATE,
+            "false_alarm_pass": normal_warning["event_false_alarms_per_site_day"]
+            <= C.MAX_FALSE_ALARMS_PER_SITE_DAY,
+            "alert_time_pass": normal_warning["event_alert_time_outside_events"]
+            <= C.MAX_ALERT_TIME_OUTSIDE_EVENTS,
+            "fault_robustness_pass": fault_detection_drop <= C.MAX_FAULT_DETECTION_DROP,
+            "ood_robustness_pass": ood_detection_drop <= C.MAX_OOD_DETECTION_DROP,
+            "brier_score_pass": normal_watch["brier_score"] <= C.MAX_BRIER_SCORE,
+            "ece_pass": normal_watch["ece"] <= C.MAX_ECE,
+        }
+        gates = {name: bool(value) for name, value in gates.items()}
+        row_gates = {
+            "row_watch_recall_pass": bool(normal_watch["recall"] >= C.WATCH_RECALL_TARGET),
+            "row_warning_precision_pass": bool(normal_warning["precision"] >= C.WARNING_PRECISION_TARGET),
+            "row_pr_auc_pass": bool(normal_watch["pr_auc"]
+                                    >= normal_watch["positive_rate_baseline"] + C.MIN_PR_AUC_MARGIN_ABOVE_BASELINE),
+        }
+        if min_episodes < C.MIN_TEST_EPISODES:
+            status = "INSUFFICIENT_EVENTS"
+        else:
+            status = "PASS" if all(gates.values()) else "FAIL"
+
+        print(f"\n{hazard.upper()} (fewest episodes in a locked test: {min_episodes})")
+        for name, value in {**gates, **row_gates}.items():
+            print(f"  {name}: {'PASS' if value else 'FAIL'}")
+        print("  FINAL STATUS:", status)
+
+        acceptance_rows.append({
+            "hazard": hazard,
+            "model_version": candidate["version"],
+            "candidate_status": status,
+            "min_test_episodes": min_episodes,
+            "watch_threshold": candidate["watch_threshold"],
+            "warning_threshold": candidate["warning_threshold"],
+            "normal_detection_rate": detection["locked_normal"],
+            "faults_detection_rate": detection["locked_faults"],
+            "ood_detection_rate": detection["locked_ood"],
+            "normal_warned_before_event": normal_warning["event_warned_before_event"],
+            "normal_median_lead_min": normal_warning["event_median_lead_min"],
+            "normal_false_alarms_per_site_day": normal_warning["event_false_alarms_per_site_day"],
+            "watch_false_alarms_per_site_day": normal_watch["event_false_alarms_per_site_day"],
+            "normal_alert_time_outside_events": normal_warning["event_alert_time_outside_events"],
+            "watch_alert_time_outside_events": normal_watch["event_alert_time_outside_events"],
+            "fault_detection_drop": fault_detection_drop,
+            "ood_detection_drop": ood_detection_drop,
+            "normal_row_watch_recall": normal_watch["recall"],
+            "normal_row_warning_precision": normal_warning["precision"],
+            "normal_row_warning_recall": normal_warning["recall"],
+            "normal_pr_auc": normal_watch["pr_auc"],
+            "normal_brier_score": normal_watch["brier_score"],
+            "normal_ece": normal_watch["ece"],
+            **gates,
+            **row_gates,
+        })
+
+        joblib.dump({
+            "model": candidate["model"],
+            "calibrator": candidate["calibrator"],
+            "hazard": hazard,
+            "node_id": config["node_id"],
+            "target": config["target"],
+            "features": list(config["features"]),
+            "watch_threshold": candidate["watch_threshold"],
+            "warning_threshold": candidate["warning_threshold"],
+            "status": status,
+            "version": candidate["version"],
+            "data_source": C.DATA_SOURCE,
+            "sklearn_version": sklearn.__version__,
+        }, model_path, compress=3)
+        registry.append({
+            "hazard": hazard,
+            "file": model_path.name,
+            "status": status,
+            "watch_threshold": candidate["watch_threshold"],
+            "warning_threshold": candidate["warning_threshold"],
+        })
+
+    # ---- Reports -------------------------------------------------------
+    reports = {
+        "base_training_metrics.csv": base_rows,
+        "calibration_metrics.csv": calibration_rows,
+        "threshold_validation_metrics.csv": threshold_rows,
+        "locked_test_metrics.csv": locked_rows,
+        "acceptance_gates.csv": acceptance_rows,
+    }
+    for file_name, rows in reports.items():
+        pd.DataFrame(rows).to_csv(report_dir / file_name, index=False)
+
+    with open(model_dir / "model_registry.json", "w") as handle:
+        json.dump({
+            "models": registry,
+            "data_source": C.DATA_SOURCE,
+            "sklearn_version": sklearn.__version__,
+            "alert_confirm_readings": C.ALERT_CONFIRM_READINGS,
+            "numpy_version": np.__version__,
+            "python_version": platform.python_version(),
+            "machine": platform.machine(),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        }, handle, indent=2)
+
+    print("\n" + "=" * 90)
+    print("SUMMARY")
+    print("=" * 90)
+    order = {hazard: index for index, hazard in enumerate(C.HAZARDS)}
+    for row in sorted(acceptance_rows, key=lambda r: order[r["hazard"]]):
+        if "normal_detection_rate" not in row:
+            print(f"{row['hazard'].upper()} | STATUS={row['candidate_status']} | {row.get('reason', '')}")
+            continue
+        print(
+            f"{row['hazard'].upper()} | STATUS={row['candidate_status']} | episodes>={row['min_test_episodes']} | "
+            f"WARNING>={row['warning_threshold']:.4f}: detected {row['normal_detection_rate']:.0%} "
+            f"(faults {row['faults_detection_rate']:.0%}, OOD {row['ood_detection_rate']:.0%}), "
+            f"before event {row['normal_warned_before_event']:.0%}, lead {row['normal_median_lead_min']:.0f} min, "
+            f"false alarms {row['normal_false_alarms_per_site_day']:.3f}/site-day, "
+            f"alert {row['normal_alert_time_outside_events']:.2%} of normal time | "
+            f"WATCH>={row['watch_threshold']:.4f}: false alarms {row['watch_false_alarms_per_site_day']:.2f}/site-day, "
+            f"alert {row['watch_alert_time_outside_events']:.2%}"
+        )
+
+    print(f"\nModels:  {model_dir}")
+    print(f"Reports: {report_dir}")
+    print(f"Total time: {time.time() - started:.1f}s")
+    print(f"\nDATA SOURCE: {C.DATA_SOURCE.upper()} - REAL-WORLD PERFORMANCE NOT ESTABLISHED")
+
+
+if __name__ == "__main__":
+    main()
+''',
     'event_metrics.py': r'''"""Event-level scoring: what an operator actually experiences.
 
 Per-row precision/recall count 5-minute readings. For an early-warning
@@ -2524,6 +4731,12 @@ def main():
             }
         gates = {name: bool(value) for name, value in gates.items()}
         status = "PASS" if all(gates.values()) else "FAIL"
+        positives = int(y_true.sum())
+        if events and events["episodes"] < C.MIN_TEST_EPISODES:
+            # Too few disasters in this file for a verdict (same rule as train.py)
+            status = f"INSUFFICIENT_EVENTS ({events['episodes']})"
+        elif not events and positives == 0:
+            status = "NO_POSITIVE_LABELS"
         print("GATES:", {k: "PASS" if v else "FAIL" for k, v in gates.items()}, "->", status)
 
         results.append({
@@ -2857,25 +5070,65 @@ if __name__ == "__main__":
     main()
 ''',
 })
-run("event_metrics.py", "--out", "output/reports/event_metrics.csv")
-run("test_live_vs_batch.py")
+TEST_FILES = []    # leave empty for an upload dialog, or list paths, e.g. ["/content/my_test.csv"]
+MODEL_FILES = []   # only if Block 3 was not run: path to pi_models.zip (empty = upload dialog)
 
-# ---- Optional: your own labelled CSV ----------------------------------
-SCORE_MY_CSV = False
-if SCORE_MY_CSV:
-    from google.colab import files
-    for name in files.upload():
-        run("evaluate_csv.py", name)
+import pandas as pd
 
-# ---- Raspberry Pi bundle ------------------------------------------------
-# Only scikit-learn must match exactly for pickled models; numpy just needs
-# the same major version (exact numpy pins often have no Raspberry Pi wheel).
-import shutil, sklearn, numpy
+# ---- 1. Trained models --------------------------------------------------
+if not os.path.exists("output/models/model_registry.json"):
+    for path in get_files(MODEL_FILES, "No trained models in this session - upload pi_models.zip"):
+        with zipfile.ZipFile(path) as archive:
+            for member in archive.namelist():
+                parts = member.split("/")
+                if "output" in parts:                      # accept pi_models.zip or the Pi package zip
+                    relative = "/".join(parts[parts.index("output"):])
+                    if relative.endswith("/"):
+                        continue
+                    os.makedirs(os.path.dirname(relative), exist_ok=True)
+                    with archive.open(member) as src, open(relative, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+    if not os.path.exists("output/models/model_registry.json"):
+        raise FileNotFoundError("that zip has no output/models/ folder - use pi_models.zip from Block 4")
+print(open("output/models/model_registry.json").read())
+
+# ---- 2. Your test data ----------------------------------------------------
+test_csvs = collect_csvs(get_files(TEST_FILES, "Upload your test data (.csv or .zip of CSVs)"), "test_data")
+test_csvs = [c for c in test_csvs if not c.endswith("_manifest.csv")]
+if not test_csvs:
+    raise RuntimeError("no CSV files found in the upload")
+
+summaries = []
+for csv_path in test_csvs:
+    name = os.path.splitext(os.path.basename(csv_path))[0]
+    out = os.path.join("output", "test_results", name)
+    print("\n" + "#" * 90 + f"\n# TEST FILE: {os.path.basename(csv_path)}\n" + "#" * 90)
+    run("evaluate_csv.py", csv_path, "--out", out)
+    result = pd.read_csv(os.path.join(out, "external_test_results.csv"))
+    result.insert(0, "file", os.path.basename(csv_path))
+    summaries.append(result)
+
+summary = pd.concat(summaries, ignore_index=True)
+summary.to_csv("output/test_results/summary.csv", index=False)
+print("\nSUMMARY (saved to output/test_results/summary.csv)")
+show(summary[[c for c in [
+    "file", "hazard", "status", "event_episodes", "event_detection_rate", "event_warned_before_event",
+    "event_median_lead_min", "event_false_alarms_per_site_day", "watch_recall", "warning_precision", "rows",
+] if c in summary.columns]])
+
+# ---- 3. Optional checks on the generated locked tests (needs Block 1 data) ---
+if os.path.exists("data/disaster_v4_locked_normal.csv"):
+    run("event_metrics.py", "--out", "output/reports/event_metrics.csv")
+    run("test_live_vs_batch.py")                         # Pi alerts == evaluation
+
+# ---- 4. Download results + Raspberry Pi bundle ----------------------------
+import sklearn, numpy
 numpy_floor = "2.0" if int(numpy.__version__.split(".")[0]) >= 2 else "1.24"
-pathlib.Path("output/requirements-pi.txt").write_text(
-    f"scikit-learn=={sklearn.__version__}\nnumpy>={numpy_floor}\npandas>=2.0\njoblib>=1.3\n")
+if not os.path.exists("output/requirements-pi.txt"):
+    pathlib.Path("output/requirements-pi.txt").write_text(
+        f"scikit-learn=={sklearn.__version__}\nnumpy>={numpy_floor}\npandas>=2.0\njoblib>=1.3\n")
 shutil.make_archive("pi_models", "zip", ".", "output")
-print("Pi bundle:", os.path.abspath("pi_models.zip"))
+print("\nResults + Pi bundle:", os.path.abspath("pi_models.zip"))
 try:
     from google.colab import files
     files.download("pi_models.zip")
