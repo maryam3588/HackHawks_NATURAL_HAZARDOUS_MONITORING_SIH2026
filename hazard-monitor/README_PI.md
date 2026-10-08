@@ -61,7 +61,7 @@ Things to know:
   exactly; `0` sends every reading (simulator demos only). After changing it:
   `sudo systemctl restart hazard-monitor`.
 * **Each card shows "5/12 trained inputs"**: how many of the inputs the model was trained on
-  the reading actually had. The current payloads give 5 of 12 (node 1) and 4 of 9 (node 2).
+  the reading actually had. The curl format gives 5 of 12 (node 1) and 4 of 9 (node 2); your sketches give 7 of 12 (12 with the MPU6050) and 8 of 9.
   Missing inputs make the ML chance unreliable. To use the model properly, have the ESP32s also
   send `rainfall_mm_h` (tipping-bucket gauge), `tilt_x_deg`, `tilt_y_deg`, `acceleration_g`,
   `gas_raw` and the TinyML `node1_*` / `node2_*` scores and labels. Extra fields are accepted by
@@ -124,7 +124,7 @@ The Pi answers `200` when saved, `400` with `details` listing the reasons when r
 | optional ML extras | number | `rainfall_mm_h`, `tilt_x_deg`, `tilt_y_deg`, `acceleration_g`, `smoke_raw`, `gas_raw`, `signal_strength`, TinyML `node1_*`/`node2_*` scores and labels |
 
 Numbers may be sent as text (`"45.2"`). Keys are snake_case. No timestamp needed — the Pi stamps it.
-The optional extras are stored and passed to the ML model; the more of them a node sends, the more of the model's inputs are real (the curl format gives 5 of 12 for NODE_01 and 4 of 9 for NODE_02; your sketches give 7 of 12 without the MPU6050 - 10+ with it - and 8 of 9).
+The optional extras are stored and passed to the ML model; the more of them a node sends, the more of the model's inputs are real (the curl format gives 5 of 12 for NODE_01 and 4 of 9 for NODE_02; your sketches give 7 of 12 without the MPU6050, all 12 with it, and 8 of 9).
 
 ### Your node sketches (use these)
 | node | folder | needs in the folder |
