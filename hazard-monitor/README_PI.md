@@ -136,6 +136,20 @@ Calibrate `SOIL_ADC_DRY`/`SOIL_ADC_WET` and `SENSOR_HEIGHT_CM` (sensor height ab
 
 No hardware yet? The dashboard's Simulator buttons generate fake data for both nodes.
 
+## Pi as the Wi-Fi hotspot (ESPs join the Pi)
+Run `bash setup.sh` **first**: it needs internet. Then:
+```
+bash hotspot.sh on
+```
+- Wi-Fi name `HAZARD-NET`, password `hazard1234`, 2.4 GHz (ESP32 can't see 5 GHz). Change them with
+  `HOTSPOT_SSID=MyNet HOTSPOT_PASSWORD=secret123 bash hotspot.sh on` (and the same in the ESP code).
+- The Pi is always **192.168.4.1**, so the ESP sends to `http://192.168.4.1:3000/api/sensor-data`.
+- It starts by itself on every boot. `bash hotspot.sh status` lists connected devices; `bash hotspot.sh off` goes back to normal Wi-Fi.
+- Your SSH session drops when it turns on: join the laptop to `HAZARD-NET`, then `ssh pi@192.168.4.1`.
+- Dashboard: join `HAZARD-NET` on a phone/laptop and open `http://192.168.4.1:3000/dashboard`.
+- While the hotspot is on, the Pi has no internet over Wi-Fi (one radio). Plug a LAN cable into the router if you need internet.
+- Needs Raspberry Pi OS Bookworm or newer (`nmcli`).
+
 ## Using MongoDB Atlas instead of local DB
 Put your Atlas URI in `.env` (`MONGODB_URI=mongodb+srv://...`) **before** `bash setup.sh` — Docker/MongoDB install is skipped. Needs internet always.
 

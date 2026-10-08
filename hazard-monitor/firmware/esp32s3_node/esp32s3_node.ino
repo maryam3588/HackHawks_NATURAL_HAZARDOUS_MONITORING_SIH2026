@@ -23,9 +23,9 @@
 #include <math.h>
 
 // ============================== SETTINGS ===================================
-const char *WIFI_SSID     = "YOUR_WIFI_NAME";
-const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-const char *PI_HOST       = "192.168.1.42";   // the Pi's IP (setup.sh prints it), or "raspberrypi.local"
+const char *WIFI_SSID     = "HAZARD-NET";     // the Pi hotspot (bash hotspot.sh on)
+const char *WIFI_PASSWORD = "hazard1234";
+const char *PI_HOST       = "192.168.4.1";    // the Pi on its own hotspot (fixed)
 const uint16_t PI_PORT    = 3000;
 const char *NODE_ID       = "NODE_01";        // "NODE_01" or "NODE_02"
 
