@@ -7,11 +7,12 @@ const axios = require('axios');
 const ML_URL = (process.env.ML_URL || 'http://127.0.0.1:5001').replace(/\/$/, '');
 const SITE_ID = process.env.SITE_ID || 'pi_site_01';
 
-// The models were trained on one reading per node every 5 minutes. Readings
-// arriving faster (the simulator sends every 2 s) are still saved and shown,
-// but only one per node per ML_SAMPLE_SECONDS is sent to the ML model.
+// Only one reading per node per ML_SAMPLE_SECONDS (default 120 = 2 minutes)
+// is sent to the ML model; faster readings (the simulator sends every 2 s) are
+// still saved and shown. The models were trained on 5-minute data, so their
+// time windows count readings: at 2 minutes "1 hour" covers about 24 minutes.
 const parsedSample = parseFloat(process.env.ML_SAMPLE_SECONDS);
-const SAMPLE_SECONDS = Number.isFinite(parsedSample) && parsedSample >= 0 ? parsedSample : 300;
+const SAMPLE_SECONDS = Number.isFinite(parsedSample) && parsedSample >= 0 ? parsedSample : 120;
 
 const state = {
   lastSentAt: {},       // node_id -> ms timestamp of last reading sent to ML

@@ -54,11 +54,12 @@ Act on the level, not the number. Disasters are rare, so the thresholds are smal
 above it is the old rule engine, which works independently of the ML.
 
 Things to know:
-* **One reading per node every 5 minutes goes to the ML model** (`ML_SAMPLE_SECONDS=300` in
-  `.env`), because the model was trained on 5-minute data. Every reading is still saved and shown.
-  For a quick demo with the simulator you can set `ML_SAMPLE_SECONDS=0`, then restart
-  (`sudo systemctl restart hazard-monitor`). The model then sees readings every 2 seconds,
-  which it was not trained for, so treat the numbers as a demo only.
+* **One reading per node every 2 minutes goes to the ML model** (`ML_SAMPLE_SECONDS=120` in
+  `.env`). Every reading is still saved and shown. The model was trained on readings 5 minutes
+  apart and its windows count readings, so at 2 minutes its "last hour" covers about 24 minutes
+  and a WARNING (2 readings in a row) can come after 4 minutes. `300` matches the training
+  exactly; `0` sends every reading (simulator demos only). After changing it:
+  `sudo systemctl restart hazard-monitor`.
 * **Each card shows "5/12 trained inputs"**: how many of the inputs the model was trained on
   the reading actually had. The current payloads give 5 of 12 (node 1) and 4 of 9 (node 2).
   Missing inputs make the ML chance unreliable. To use the model properly, have the ESP32s also

@@ -64,7 +64,7 @@ MONGODB_URI="$(grep -E '^MONGODB_URI=' .env | tail -1 | cut -d= -f2- | tr -d '"'
 MONGODB_URI="${MONGODB_URI:-mongodb://127.0.0.1:27017/environmental-monitoring}"
 # ML settings (added to older .env files that do not have them yet)
 grep -qE '^ML_URL=' .env || printf '\n# ML model service (ml/live_inference.py) on this Pi\nML_URL=http://127.0.0.1:5001\n' >> .env
-grep -qE '^ML_SAMPLE_SECONDS=' .env || printf '# One reading per node every N seconds goes to the ML model (it was trained on 5-minute data)\nML_SAMPLE_SECONDS=300\n' >> .env
+grep -qE '^ML_SAMPLE_SECONDS=' .env || printf '# One reading per node every N seconds goes to the ML model (120 = every 2 minutes; trained on 5-minute data)\nML_SAMPLE_SECONDS=120\n' >> .env
 ML_URL="$(grep -E '^ML_URL=' .env | tail -1 | cut -d= -f2- | tr -d '"'"'"' \r')"
 ML_PORT="${ML_URL##*:}"; ML_PORT="${ML_PORT%%/*}"
 case "$ML_PORT" in ''|*[!0-9]*) ML_PORT=5001 ;; esac
