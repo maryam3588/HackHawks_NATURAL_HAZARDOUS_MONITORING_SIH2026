@@ -4,7 +4,9 @@
 #
 #  Usage (on the Pi, inside this folder):   bash setup.sh
 #
-#  What it does (safe to re-run):
+#  What it does (safe to re-run - anything already on the Pi is kept, not
+#  installed again: apt packages, Node, Docker, the MongoDB image/container and
+#  its data, npm packages, the ML Python libraries):
 #    1. checks you are on 64-bit Raspberry Pi OS
 #    2. installs Node.js 22 (mongoose 9 needs Node >= 20.19)
 #    3. installs MongoDB in Docker, picking the right version for your Pi
@@ -73,9 +75,24 @@ case "$MONGODB_URI" in
   *) LOCAL_DB=0 ;;
 esac
 
-say "Installing base packages"
-$SUDO apt-get update -y
-$SUDO apt-get install -y ca-certificates curl gnupg python3 python3-venv python3-pip
+# Installs only the packages that are missing; apt-get update runs at most once
+APT_UPDATED=0
+apt_install() {
+  local missing=()
+  for p in "$@"; do
+    dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
+  done
+  if [ "${#missing[@]}" -eq 0 ]; then
+    ok "already installed: $*"
+    return
+  fi
+  warn "installing: ${missing[*]}"
+  if [ "$APT_UPDATED" = "0" ]; then $SUDO apt-get update -y; APT_UPDATED=1; fi
+  $SUDO apt-get install -y "${missing[@]}"
+}
+
+say "Checking base packages"
+apt_install ca-certificates curl gnupg python3 python3-venv python3-pip
 
 # ---------------------------------------------------------------- 2. Node.js
 node_ok() {
@@ -101,6 +118,8 @@ if [ "$LOCAL_DB" = "1" ]; then
   if ! command -v docker >/dev/null 2>&1; then
     warn "Installing Docker (takes a few minutes)"
     curl -fsSL https://get.docker.com | $SUDO sh
+  else
+    ok "Docker already installed"
   fi
   $SUDO systemctl enable --now docker >/dev/null
   ok "Docker $($SUDO docker --version | awk '{print $3}' | tr -d ,)"
@@ -121,13 +140,18 @@ if [ "$LOCAL_DB" = "1" ]; then
     fi
   fi
   if ! $SUDO docker ps -a --format '{{.Names}}' | grep -qx "$MONGO_CONTAINER"; then
-    $SUDO docker pull "$MONGO_IMAGE"
+    if $SUDO docker image inspect "$MONGO_IMAGE" >/dev/null 2>&1; then
+      ok "image $MONGO_IMAGE already downloaded"
+    else
+      $SUDO docker pull "$MONGO_IMAGE"
+    fi
     # bound to 127.0.0.1 only: the DB has no password, so it must not be reachable from the LAN
     $SUDO docker run -d --name "$MONGO_CONTAINER" --restart unless-stopped \
       -p 127.0.0.1:27017:27017 -v "$MONGO_VOLUME":/data/db \
       "$MONGO_IMAGE" --wiredTigerCacheSizeGB 0.25 >/dev/null
   else
     $SUDO docker start "$MONGO_CONTAINER" >/dev/null
+    ok "existing MongoDB container reused (saved readings kept)"
   fi
   ok "MongoDB container '$MONGO_CONTAINER' started"
 else
@@ -135,13 +159,33 @@ else
 fi
 
 # ---------------------------------------------------------------- 4. npm packages
-say "Installing app packages"
-if [ -f package-lock.json ]; then
-  run_as_app_user npm ci --omit=dev --no-audit --no-fund
-else
-  run_as_app_user npm install --omit=dev --no-audit --no-fund
+say "Checking app packages"
+# Skip npm if node_modules was built from this exact package.json + lock with this Node version.
+# The stamp matches the one older hazard-monitor setups write, so a node_modules left in an
+# old copy of this folder (hazard-monitor-old / -other) is reused instead of downloaded again.
+DEPS_STAMP=node_modules/.hazard-setup-stamp
+DEPS_HASH="$( { node -v; cat package.json package-lock.json 2>/dev/null; } | sha256sum | cut -d' ' -f1)"
+if [ ! -f "$DEPS_STAMP" ]; then
+  for old in "$APP_DIR-old" "$APP_DIR-other" "$APP_DIR-mine"; do
+    if [ -f "$old/$DEPS_STAMP" ] && [ "$(cat "$old/$DEPS_STAMP")" = "$DEPS_HASH" ]; then
+      run_as_app_user cp -a "$old/node_modules" "$APP_DIR/"
+      ok "node_modules copied from $old"
+      break
+    fi
+  done
 fi
-ok "node_modules ready"
+if [ -f "$DEPS_STAMP" ] && [ "$(cat "$DEPS_STAMP")" = "$DEPS_HASH" ]; then
+  ok "node_modules already up to date"
+else
+  warn "installing npm packages"
+  if [ -f package-lock.json ]; then
+    run_as_app_user npm ci --omit=dev --no-audit --no-fund
+  else
+    run_as_app_user npm install --omit=dev --no-audit --no-fund
+  fi
+  run_as_app_user sh -c 'printf "%s\n" "$1" > "$2"' _ "$DEPS_HASH" "$DEPS_STAMP"
+  ok "node_modules ready"
+fi
 
 say "Waiting for MongoDB to accept connections"
 DB_UP=0
@@ -168,10 +212,29 @@ say "Setting up the ML model (Python)"
 ML_REQ=ml/output/requirements-pi.txt
 [ -f "$ML_REQ" ] || die "$ML_REQ is missing - it comes with pi_models.zip from Colab."
 [ -x ml/.venv/bin/python ] || run_as_app_user python3 -m venv ml/.venv
-run_as_app_user ml/.venv/bin/pip install --upgrade pip --quiet
-if ! run_as_app_user ml/.venv/bin/pip install -r "$ML_REQ"; then
-  die "Could not install the ML libraries in $ML_REQ (see above).
+# Skip pip if the venv already has every library in requirements-pi.txt at the right version
+if run_as_app_user ml/.venv/bin/python - "$ML_REQ" >/dev/null 2>&1 <<'PY'
+import sys
+from importlib.metadata import version
+try:
+    from packaging.requirements import Requirement
+except ImportError:  # not always installed; pip ships its own copy
+    from pip._vendor.packaging.requirements import Requirement
+for line in open(sys.argv[1]):
+    line = line.split("#")[0].strip()
+    if line:
+        req = Requirement(line)
+        assert req.specifier.contains(version(req.name), prereleases=True)
+PY
+then
+  ok "ML libraries already installed"
+else
+  warn "installing ML libraries"
+  run_as_app_user ml/.venv/bin/pip install --upgrade pip --quiet
+  if ! run_as_app_user ml/.venv/bin/pip install -r "$ML_REQ"; then
+    die "Could not install the ML libraries in $ML_REQ (see above).
     The models need exactly that scikit-learn version. Send me the error."
+  fi
 fi
 ok "ML libraries: $(run_as_app_user ml/.venv/bin/python -c 'import sklearn; print("scikit-learn", sklearn.__version__)')"
 if ! (cd ml && run_as_app_user .venv/bin/python live_inference.py stdin < sample_readings.jsonl > /dev/null); then
