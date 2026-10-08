@@ -4816,6 +4816,36 @@ FIELD_ALIASES = {
 }
 
 
+# Raw inputs the models were trained on, per node. Used to report how much
+# of what a model expects each reading actually carried.
+NODE_INPUTS = {
+    "node1": [
+        "water_level_cm", "rainfall_mm_h", "soil_moisture_pct", "temperature_c", "humidity_pct",
+        "tilt_x_deg", "tilt_y_deg", "acceleration_g", "node1_flood_score", "node1_landslide_score",
+        "node1_flood_label", "node1_landslide_label",
+    ],
+    "node2": [
+        "temperature_c", "humidity_pct", "smoke_raw", "gas_raw", "flame", "node2_wildfire_score",
+        "node2_extreme_heat_score", "node2_wildfire_label", "node2_extreme_heat_label",
+    ],
+}
+
+
+def input_report(original, normalised, node_id):
+    """Which trained inputs this reading really had (an assumed tilt_y = 0 does not count)."""
+    expected = NODE_INPUTS.get(node_id, [])
+    received = [
+        name for name in expected
+        if normalised.get(name) is not None
+        and not (name == "tilt_y_deg" and "tilt_y_deg" not in original)
+    ]
+    return {
+        "received": len(received),
+        "expected": len(expected),
+        "missing": [name for name in expected if name not in received],
+    }
+
+
 def normalise_reading(reading):
     reading = dict(reading)
     for alias, column in FIELD_ALIASES.items():
@@ -4869,11 +4899,15 @@ class HazardPredictor:
             )
 
     def predict(self, reading):
+        original = reading
         reading = normalise_reading(reading)
         site_id = str(reading.get("site_id", "default_site"))
         with self.lock:
             node_id, features = self.engine.update(reading)
-            return self._predict(node_id, site_id, reading, features)
+            result = self._predict(node_id, site_id, reading, features)
+        if "hazards" in result:
+            result["inputs"] = input_report(original, reading, node_id)
+        return result
 
     def _predict(self, node_id, site_id, reading, features):
         hazards = {}

@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+
+require('dotenv').config();
+const app = require('../app');
+const http = require('http');
+const socketIo = require('socket.io');
+const { connectDatabase } = require('../database/database');
+const { initializeDefaultNodes } = require('../services/initService');
+const simulator = require('../simulator/simulator');
+
+const server = http.createServer(app);
+const io = socketIo(server, {
+  cors: { origin: '*' }
+});
+
+// Initialize database and start server
+(async () => {
+  await connectDatabase();
+  await initializeDefaultNodes();
+
+  // Socket.IO connections
+  io.on('connection', (socket) => {
+    console.log('✓ Client connected:', socket.id);
+
+    socket.on('disconnect', () => {
+      console.log('✗ Client disconnected:', socket.id);
+    });
+
+    // Simulator controls
+    socket.on('simulator:start', () => {
+      simulator.start();
+      io.emit('simulator:status', { running: true });
+    });
+
+    socket.on('simulator:stop', () => {
+      simulator.stop();
+      io.emit('simulator:status', { running: false });
+    });
+
+    socket.on('simulator:trigger-flood', () => {
+      simulator.triggerFloodNode1();
+    });
+
+    socket.on('simulator:trigger-landslide', () => {
+      simulator.triggerLandslideNode1();
+    });
+
+    socket.on('simulator:trigger-fire', () => {
+      simulator.triggerFireNode2();
+    });
+
+    socket.on('simulator:trigger-heat', () => {
+      simulator.triggerHeatNode2();
+    });
+
+    socket.on('simulator:reset', () => {
+      simulator.resetAll();
+    });
+  });
+
+  app.set('io', io);
+
+  const PORT = process.env.PORT || 3000;
+  server.listen(PORT, () => {
+    console.log(`\n🚀 Server running on http://localhost:${PORT}`);
+    console.log('🌐 WebSocket ready\n');
+  });
+})();
+
+module.exports = server;
