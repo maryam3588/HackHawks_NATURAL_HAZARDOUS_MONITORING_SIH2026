@@ -3,9 +3,13 @@
   ESP32-S3 | sensors -> on-device TFLite Micro models -> one JSON line per sample
 
   Output: JSON only, no web page.
+    - Raspberry Pi: joins the Pi's hotspot (bash hotspot.sh on -> HAZARD-NET) and POSTs the
+      JSON to http://192.168.4.1:3000/api/sensor-data every POST_MS. Watch it on the Pi's
+      ESP Live page: http://192.168.4.1:3000/esp
     - WiFi: any phone/laptop on the same network opens  http://<node-ip>/  (or /data)
       and gets the latest reading as JSON. CORS is enabled so other apps can fetch it.
-      If the router is unreachable the node starts its own hotspot (see AP_SSID below).
+      If the Pi's hotspot is unreachable the node starts its own hotspot (see AP_SSID below)
+      and keeps retrying the Pi in the background; the hotspot turns off once it connects.
     - Serial (115200): the same JSON, one line per sample (set SERIAL_JSON 0 to disable).
     - Lines with "event" or "error" (Serial only) are status messages; skip them in a parser.
 
@@ -18,13 +22,19 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <HTTPClient.h>
 #include <Chirale_TensorFlowLite.h>
 
 #include "tensorflow/lite/micro/all_ops_resolver.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
-#include "flood_model.h"
+#if __has_include("flood_model.h")
+  #include "flood_model.h"
+  #define HAVE_FLOOD_MODEL 1
+#else
+  #define HAVE_FLOOD_MODEL 0      // flood_model.h not in the sketch folder -> flood risk stays null
+#endif
 #if __has_include("landslide_model.h")
   #include "landslide_model.h"
   #define HAVE_SLIDE_MODEL 1
@@ -47,10 +57,15 @@
 #define SERIAL_JSON    1        // also print each JSON line on Serial
 
 // ---------------- WiFi ----------------
-const char* WIFI_SSID = "FIRST_NODE";        // 2.4 GHz network only
-const char* WIFI_PASS = "12345678";
+const char* WIFI_SSID = "HAZARD-NET";        // the Pi's hotspot (bash hotspot.sh on), 2.4 GHz
+const char* WIFI_PASS = "hazard1234";        // must match HOTSPOT_PASSWORD on the Pi
 const char* AP_SSID   = "NODE01-JSON";           // fallback hotspot
 const char* AP_PASS   = "12345678";              // min 8 characters
+
+// ---------------- Raspberry Pi ----------------
+const char* PI_URL   = "http://192.168.4.1:3000/api/sensor-data";   // the Pi on its own hotspot
+#define POST_MS         5000    // send the latest reading to the Pi every 5 s (sampling stays SAMPLE_MS)
+#define PI_TIMEOUT_MS   800     // the Pi saves the reading even if its answer comes later than this
 
 // ---------------- Pins ----------------
 #define DHTPIN 4
@@ -71,6 +86,7 @@ const int   RAIN_DRY_ADC = 4095, RAIN_WET_ADC = 1000;               // lower ADC
 const float RAIN_MAX_MM  = 50.0f;                                    // mm at fully wet
 const int   WATER_EMPTY_ADC = 0, WATER_FULL_ADC = 2500;              // analog level sensor
 const float WATER_MAX_CM = 100.0f;                                   // cm at full
+const float SENSOR_HEIGHT_CM = 100.0f;   // JSN-SR04T only: sensor height above the empty riverbed/tank
 // NOTE: the flood model reads water level as a level that RISES with flooding
 // (training mean 139 cm, std 211 cm). Capping at 100 cm limits how high the risk can go.
 
@@ -90,7 +106,7 @@ const char* LABELS[4] = {"LOW", "MEDIUM", "HIGH", "CRITICAL"};
 DHT dht(DHTPIN, DHTTYPE);
 static tflite::AllOpsResolver resolver;
 WebServer server(80);
-char latestJson[768] = "{\"status\":\"starting\"}";
+char latestJson[1024] = "{\"status\":\"starting\"}";
 
 struct MLModel {
   const char* name;
@@ -112,6 +128,8 @@ alignas(16) static uint8_t slideArena[ARENA_SIZE];
 MLModel flood, slide;
 
 bool mpuOk = false;
+bool apOn = false;                 // fallback hotspot running
+unsigned long lastPost = 0, lastWifiTry = 0;
 float lastTemp = NAN, lastHum = NAN, lastWater = NAN;
 unsigned long nextTick = 0;
 
@@ -139,7 +157,8 @@ float readWaterCm() {
   digitalWrite(TRIG_PIN, LOW);
   unsigned long d = pulseIn(ECHO_PIN, HIGH, 30000);
   if (d == 0) return NAN;
-  return d * 0.0343f / 2.0f;
+  float distance = d * 0.0343f / 2.0f;              // sensor -> water surface
+  return constrain(SENSOR_HEIGHT_CM - distance, 0.0f, WATER_MAX_CM);   // water level = height - distance
 #else
   int raw = analogRead(WATER_PIN);
   float cm = (float)(raw - WATER_EMPTY_ADC) * WATER_MAX_CM / (WATER_FULL_ADC - WATER_EMPTY_ADC);
@@ -215,8 +234,8 @@ void pushWindow(MLModel& m, const float* feat) {
   }
 }
 
-// returns true and fills cls/conf when the window is full and inference succeeded
-bool predict(MLModel& m, int& cls, float& conf) {
+// returns true and fills cls/conf (and the 4 class probabilities) when the window is full and inference succeeded
+bool predict(MLModel& m, int& cls, float& conf, float* probs) {
   if (!m.ok || m.count < WINDOW) return false;
 
   int8_t* dst = m.in->data.int8;
@@ -238,6 +257,7 @@ bool predict(MLModel& m, int& cls, float& conf) {
   cls = 0;
   for (int i = 0; i < nCls; i++) {
     float p = (m.out->data.int8[i] - m.out->params.zero_point) * m.out->params.scale;
+    probs[i] = constrain(p, 0.0f, 1.0f);
     if (p > best) { best = p; cls = i; }
   }
   conf = constrain(best, 0.0f, 1.0f);
@@ -252,20 +272,23 @@ void handleJson() {
 }
 
 void connectWiFi() {
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);            // station (to the Pi) + room for the fallback hotspot
+  WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) delay(250);
 
-  char b[160];
+  char b[200];
   if (WiFi.status() == WL_CONNECTED) {
+    WiFi.mode(WIFI_STA);
     snprintf(b, sizeof(b), "{\"event\":\"wifi\",\"mode\":\"STA\",\"ip\":\"%s\"}",
              WiFi.localIP().toString().c_str());
   } else {
-    WiFi.mode(WIFI_AP);
+    // Pi not reachable yet (e.g. it is still booting): own hotspot now, keep retrying the Pi
     WiFi.softAP(AP_SSID, AP_PASS);
-    snprintf(b, sizeof(b), "{\"event\":\"wifi\",\"mode\":\"AP\",\"ssid\":\"%s\",\"ip\":\"%s\"}",
-             AP_SSID, WiFi.softAPIP().toString().c_str());
+    apOn = true;
+    snprintf(b, sizeof(b), "{\"event\":\"wifi\",\"mode\":\"AP\",\"ssid\":\"%s\",\"ip\":\"%s\",\"retrying\":\"%s\"}",
+             AP_SSID, WiFi.softAPIP().toString().c_str(), WIFI_SSID);
   }
   sendLine(b);
 
@@ -273,6 +296,48 @@ void connectWiFi() {
   server.on("/", handleJson);
   server.on("/data", handleJson);
   server.begin();
+}
+
+// Call every loop pass: reconnects to the Pi's hotspot and drops the fallback hotspot once connected
+void keepWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (apOn) {
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_STA);
+      apOn = false;
+      char b[160];
+      snprintf(b, sizeof(b), "{\"event\":\"wifi\",\"mode\":\"STA\",\"ip\":\"%s\"}",
+               WiFi.localIP().toString().c_str());
+      sendLine(b);
+    }
+    return;
+  }
+  if (millis() - lastWifiTry >= 10000) {
+    lastWifiTry = millis();
+    WiFi.reconnect();
+  }
+}
+
+// POST one JSON reading to the Pi. Prints the HTTP result on Serial only when it changes
+// (200 = saved, 400 = rejected - the Pi's ESP Live page shows why, -11 = slow answer, still saved).
+void postToPi(const char* json) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  WiFiClient client;
+  HTTPClient http;
+  http.setConnectTimeout(PI_TIMEOUT_MS);
+  http.setTimeout(PI_TIMEOUT_MS);
+  if (!http.begin(client, PI_URL)) return;
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST((uint8_t*)json, strlen(json));
+  http.end();
+
+  static int lastCode = 0;
+  if (code != lastCode) {
+    lastCode = code;
+    char b[96];
+    snprintf(b, sizeof(b), "{\"event\":\"pi_post\",\"http\":%d}", code);
+    sendLine(b);
+  }
 }
 
 // ---------------- Setup ----------------
@@ -294,8 +359,12 @@ void setup() {
 #endif
 
   const char* e;
+#if HAVE_FLOOD_MODEL
   e = modelSetup(flood, "flood", FLOOD_MODEL_DATA, 2, FLOOD_MEAN, FLOOD_STD, floodArena);
   if (e) sendError("flood model", e);
+#else
+  sendError("flood model", "flood_model.h not found, model disabled");
+#endif
 #if HAVE_SLIDE_MODEL
   e = modelSetup(slide, "landslide", LANDSLIDE_MODEL_DATA, 10, SLIDE_MEAN, SLIDE_STD, slideArena);
   if (e) sendError("landslide model", e);
@@ -316,6 +385,7 @@ void setup() {
 // ---------------- Loop ----------------
 void loop() {
   server.handleClient();
+  keepWiFi();
   if ((long)(millis() - nextTick) < 0) return;
   nextTick += SAMPLE_MS;
 
@@ -359,21 +429,23 @@ void loop() {
   if (imuLive) pushWindow(slide, sf); else slide.count = 0;
 
   int fCls = 0, sCls = 0; float fConf = 0, sConf = 0;
-  bool fOk = predict(flood, fCls, fConf);
-  bool sOk = predict(slide, sCls, sConf);
+  float fP[4] = {0}, sP[4] = {0};
+  bool fOk = predict(flood, fCls, fConf, fP);
+  bool sOk = predict(slide, sCls, sConf, sP);
 
   // --- build JSON ---
-  char floodJ[80], slideJ[100];
-  if (fOk) snprintf(floodJ, sizeof(floodJ), "{\"percentage\":%d,\"label\":\"%s\"}",
-                    (int)lroundf(fConf * 100), LABELS[fCls]);
+  // "levels" = probability of LOW, MEDIUM, HIGH, CRITICAL (the Pi turns it into a 0..1 hazard score)
+  char floodJ[160], slideJ[160];
+  if (fOk) snprintf(floodJ, sizeof(floodJ), "{\"percentage\":%d,\"label\":\"%s\",\"levels\":[%.3f,%.3f,%.3f,%.3f]}",
+                    (int)lroundf(fConf * 100), LABELS[fCls], fP[0], fP[1], fP[2], fP[3]);
   else     snprintf(floodJ, sizeof(floodJ), "{\"percentage\":null,\"label\":null}");
 
-  if (sOk) snprintf(slideJ, sizeof(slideJ), "{\"percentage\":%d,\"label\":\"%s\"}",
-                    (int)lroundf(sConf * 100), LABELS[sCls]);
+  if (sOk) snprintf(slideJ, sizeof(slideJ), "{\"percentage\":%d,\"label\":\"%s\",\"levels\":[%.3f,%.3f,%.3f,%.3f]}",
+                    (int)lroundf(sConf * 100), LABELS[sCls], sP[0], sP[1], sP[2], sP[3]);
   else     snprintf(slideJ, sizeof(slideJ), "{\"percentage\":null,\"label\":null%s}",
                     imuLive ? "" : ",\"reason\":\"no_imu\"");
 
-  char sWater[16], sSoil[16], sTemp[16], sHum[16], sTx[16], sTy[16], sAcc[16];
+  char sWater[16], sSoil[16], sTemp[16], sHum[16], sTx[16], sTy[16], sAcc[16], sRain[16];
   num(sWater, sizeof(sWater), lastWater, 1);
   num(sSoil,  sizeof(sSoil),  soilPct,   0);
   num(sTemp,  sizeof(sTemp),  lastTemp,  0);
@@ -381,12 +453,14 @@ void loop() {
   num(sTx,    sizeof(sTx),    tiltXo,    1);
   num(sTy,    sizeof(sTy),    tiltYo,    1);
   num(sAcc,   sizeof(sAcc),   accMag,    2);
-3
-  char buf[768];
+  num(sRain,  sizeof(sRain),  rainMm,    1);
+
+  char buf[1024];
   snprintf(buf, sizeof(buf),
-    "{\"nodeId\":\"%s\",\"timestamp\":%lu,\"sensors\":{"
+    "{\"nodeId\":\"%s\",\"timestamp\":%lu,\"rssi\":%d,\"sensors\":{"
       "\"waterLevel\":{\"value\":%s,\"unit\":\"cm\"},"
       "\"rain\":{\"value\":%d,\"unit\":\"raw_adc\"},"
+      "\"rainfall\":{\"value\":%s,\"unit\":\"mm\"},"
       "\"soilMoisture\":{\"value\":%s,\"unit\":\"%%\"},"
       "\"temperature\":{\"value\":%s,\"unit\":\"\\u00b0C\"},"
       "\"humidity\":{\"value\":%s,\"unit\":\"%%\"},"
@@ -394,11 +468,15 @@ void loop() {
       "\"tiltY\":{\"value\":%s,\"unit\":\"\\u00b0\"},"
       "\"acceleration\":{\"value\":%s,\"unit\":\"g\"}},"
     "\"risk\":{\"flood\":%s,\"landslide\":%s}}",
-    NODE_ID, millis() / 1000UL,
-    sWater, rainRaw, sSoil, sTemp, sHum, sTx, sTy, sAcc,
+    NODE_ID, millis() / 1000UL, (int)(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0),
+    sWater, rainRaw, sRain, sSoil, sTemp, sHum, sTx, sTy, sAcc,
     floodJ, slideJ);
 
   snprintf(latestJson, sizeof(latestJson), "%s", buf);   // served to WiFi clients
+  if (millis() - lastPost >= POST_MS) {                  // send to the Raspberry Pi
+    lastPost = millis();
+    postToPi(buf);
+  }
 #if SERIAL_JSON
   sendLine(buf);
 #endif

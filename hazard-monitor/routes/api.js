@@ -8,6 +8,7 @@ const riskEngine = require('../services/riskEngine');
 const mlClient = require('../services/mlClient');
 const receiveLog = require('../services/receiveLog');
 const mlDataset = require('../services/mlDataset');
+const espFormat = require('../services/espFormat');
 
 // Extra numeric fields an ESP32 node may send for the ML model. They are not
 // needed by the dashboard; they are stored in SensorReading.extra and passed on.
@@ -15,6 +16,7 @@ const EXTRA_NUMERIC_FIELDS = [
   'rainfall_mm_h', 'tilt_x_deg', 'tilt_y_deg', 'acceleration_g', 'smoke_raw', 'gas_raw',
   'node1_flood_score', 'node1_landslide_score', 'node1_flood_label', 'node1_landslide_label',
   'node2_wildfire_score', 'node2_extreme_heat_score', 'node2_wildfire_label', 'node2_extreme_heat_label',
+  'rain_raw', 'flame_raw', 'device_uptime_s',
 ];
 const NUMERIC_FIELDS = ['soil_moisture', 'water_level', 'temperature', 'humidity', 'tilt', 'smoke', 'signal_strength',
   ...EXTRA_NUMERIC_FIELDS];
@@ -23,9 +25,11 @@ const BOOLEAN_FIELDS = ['rain', 'flame'];
 // ESP32 firmware often sends 1/0 or "true" for booleans and numbers as text.
 // Convert those to proper types before validating. Anything that cannot be
 // converted is left as it is, so validation reports it.
+// The team sketches' nested format ({"nodeId":..,"sensors":{..}}) is first
+// translated to the flat one by services/espFormat.js.
 const normalizePayload = (body) => {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
-  const data = { ...body };
+  const data = { ...espFormat.toFlat(body) };
   if (typeof data.node_id === 'string') data.node_id = data.node_id.trim().toUpperCase();
   BOOLEAN_FIELDS.forEach((field) => {
     const value = data[field];
@@ -52,7 +56,7 @@ const validateSensorData = (data) => {
     water_level: [0, 100],
     temperature: [-50, 60],
     humidity: [0, 100],
-    tilt: [-10, 10],
+    tilt: [-90, 90],
     smoke: [0, 1000],
   };
 

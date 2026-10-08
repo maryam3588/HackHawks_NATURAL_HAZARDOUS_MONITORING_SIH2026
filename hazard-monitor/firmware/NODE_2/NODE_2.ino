@@ -4,9 +4,12 @@
 
   Output: JSON only, no web page.
     - WiFi: open  http://<node-ip>/  (or /data)  on any phone/laptop on the same network.
-      If the router is unreachable the node starts its own hotspot (NODE02-JSON, http://192.168.4.1/).
-    - Gateway: every sample is also POSTed to the ESP8266 gateway at GATEWAY_URL below
-      (fire-and-forget; a missed gateway doesn't block sampling or alerts).
+      If the Pi's hotspot is unreachable the node starts its own hotspot (NODE02-JSON,
+      http://192.168.4.1/) and keeps retrying the Pi; the hotspot turns off once it connects.
+    - Raspberry Pi: the Pi replaces the ESP8266 gateway. The node joins the Pi's hotspot
+      (bash hotspot.sh on -> HAZARD-NET) and POSTs the JSON to PI_URL every POST_MS, and at
+      once when the alert level changes (e.g. instant flame alert). A slow or missing Pi
+      doesn't block sampling or alerts for long. Watch it on http://192.168.4.1:3000/esp
     - Serial (115200): the same JSON, one line per sample (SERIAL_JSON 0 to disable).
     - Lines with "event" or "error" (Serial only) are status messages.
 
@@ -45,13 +48,15 @@ enum AlertState { AL_WARMUP = 0, AL_LOW, AL_MEDIUM, AL_HIGH, AL_CRITICAL, AL_FAU
 #define SERIAL_JSON 1
 
 // ---------------- WiFi ----------------
-const char* WIFI_SSID = "HAZARD-GW";         // <<< CHECK >>> must match the ESP8266 gateway's AP_SSID
-const char* WIFI_PASS = "12345678";          // <<< CHECK >>> must match the ESP8266 gateway's AP_PASS
+const char* WIFI_SSID = "HAZARD-NET";        // the Pi's hotspot (bash hotspot.sh on), 2.4 GHz
+const char* WIFI_PASS = "hazard1234";        // must match HOTSPOT_PASSWORD on the Pi
 const char* AP_SSID   = "NODE02-JSON";           // fallback hotspot (used only if the gateway is unreachable)
 const char* AP_PASS   = "12345678";
 
-// ---------------- Gateway push ----------------
-const char* GATEWAY_URL = "http://192.168.4.1/ingest/node2";  // <<< CHECK >>> ESP8266 SoftAP's fixed IP
+// ---------------- Raspberry Pi ----------------
+const char* PI_URL = "http://192.168.4.1:3000/api/sensor-data";   // the Pi on its own hotspot
+#define POST_MS        5000     // send the latest reading to the Pi every 5 s (sampling stays SAMPLE_MS)
+#define PI_TIMEOUT_MS  400      // the Pi saves the reading even if its answer comes later than this
 
 // ---------------- Pins ----------------
 #define DHTPIN    4
@@ -137,7 +142,7 @@ const char* LABELS[4] = {"LOW", "MEDIUM", "HIGH", "CRITICAL"};
 DHT dht(DHTPIN, DHTTYPE);
 static tflite::AllOpsResolver resolver;
 WebServer server(80);
-char latestJson[640] = "{\"status\":\"starting\"}";
+char latestJson[1024] = "{\"status\":\"starting\"}";
 
 struct MLModel {
   const unsigned char* data;
@@ -159,6 +164,9 @@ MLModel heat, fire;
 
 float lastTemp = NAN, lastHum = NAN;
 unsigned long nextTick = 0;
+bool apOn = false;                 // fallback hotspot running
+unsigned long lastPost = 0, lastWifiTry = 0;
+int lastPostedAlert = -1;          // alert level in the last packet sent to the Pi
 
 // ---------------- Output ----------------
 void sendLine(const char* s) { Serial.println(s); }   // add LoRa.print(s) here later if needed
@@ -174,17 +182,27 @@ void num(char* out, size_t n, float v, int dec) {
   else snprintf(out, n, "%.*f", dec, v);
 }
 
-// Fire-and-forget POST to the ESP8266 gateway. Short timeout so a slow/unreachable
-// gateway can't stall sensor sampling or the LED/buzzer alerts for long.
-void pushToGateway(const char* json) {
-  if (WiFi.status() != WL_CONNECTED) return;   // not on the gateway's network right now
+// POST to the Raspberry Pi. Short timeout so a slow/unreachable Pi can't stall sensor
+// sampling or the LED/buzzer alerts for long; the Pi still saves a reading it answers late.
+// Prints the HTTP result on Serial only when it changes
+// (200 = saved, 400 = rejected - the Pi's ESP Live page shows why, -11 = slow answer, still saved).
+void postToPi(const char* json) {
+  if (WiFi.status() != WL_CONNECTED) return;   // not on the Pi's network right now
   WiFiClient client;
   HTTPClient http;
-  http.setTimeout(400);
-  if (http.begin(client, GATEWAY_URL)) {
-    http.addHeader("Content-Type", "application/json");
-    http.POST((uint8_t*)json, strlen(json));
-    http.end();
+  http.setConnectTimeout(PI_TIMEOUT_MS);
+  http.setTimeout(PI_TIMEOUT_MS);
+  if (!http.begin(client, PI_URL)) return;
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST((uint8_t*)json, strlen(json));
+  http.end();
+
+  static int lastCode = 0;
+  if (code != lastCode) {
+    lastCode = code;
+    char b[96];
+    snprintf(b, sizeof(b), "{\"event\":\"pi_post\",\"http\":%d}", code);
+    sendLine(b);
   }
 }
 
@@ -224,7 +242,7 @@ void pushWindow(MLModel& m, const float* feat) {
   }
 }
 
-bool predict(MLModel& m, int& cls, float& conf) {
+bool predict(MLModel& m, int& cls, float& conf, float* probs) {
   if (!m.ok || m.count < m.winLen) return false;
 
   int8_t* dst = m.in->data.int8;
@@ -245,6 +263,7 @@ bool predict(MLModel& m, int& cls, float& conf) {
   cls = 0;
   for (int i = 0; i < 4; i++) {
     float p = (m.out->data.int8[i] - m.out->params.zero_point) * m.out->params.scale;
+    probs[i] = constrain(p, 0.0f, 1.0f);
     if (p > best) { best = p; cls = i; }
   }
   conf = constrain(best, 0.0f, 1.0f);
@@ -352,7 +371,8 @@ void handleJson() {
 }
 
 void connectWiFi() {
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);            // station (to the Pi) + room for the fallback hotspot
+  WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
@@ -360,15 +380,17 @@ void connectWiFi() {
     delay(20);
   }
 
-  char b[160];
+  char b[200];
   if (WiFi.status() == WL_CONNECTED) {
+    WiFi.mode(WIFI_STA);
     snprintf(b, sizeof(b), "{\"event\":\"wifi\",\"mode\":\"STA\",\"ip\":\"%s\"}",
              WiFi.localIP().toString().c_str());
   } else {
-    WiFi.mode(WIFI_AP);
+    // Pi not reachable yet (e.g. it is still booting): own hotspot now, keep retrying the Pi
     WiFi.softAP(AP_SSID, AP_PASS);
-    snprintf(b, sizeof(b), "{\"event\":\"wifi\",\"mode\":\"AP\",\"ssid\":\"%s\",\"ip\":\"%s\"}",
-             AP_SSID, WiFi.softAPIP().toString().c_str());
+    apOn = true;
+    snprintf(b, sizeof(b), "{\"event\":\"wifi\",\"mode\":\"AP\",\"ssid\":\"%s\",\"ip\":\"%s\",\"retrying\":\"%s\"}",
+             AP_SSID, WiFi.softAPIP().toString().c_str(), WIFI_SSID);
   }
   sendLine(b);
 
@@ -376,6 +398,26 @@ void connectWiFi() {
   server.on("/", handleJson);
   server.on("/data", handleJson);
   server.begin();
+}
+
+// Call every loop pass: reconnects to the Pi's hotspot and drops the fallback hotspot once connected
+void keepWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (apOn) {
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_STA);
+      apOn = false;
+      char b[160];
+      snprintf(b, sizeof(b), "{\"event\":\"wifi\",\"mode\":\"STA\",\"ip\":\"%s\"}",
+               WiFi.localIP().toString().c_str());
+      sendLine(b);
+    }
+    return;
+  }
+  if (millis() - lastWifiTry >= 10000) {
+    lastWifiTry = millis();
+    WiFi.reconnect();
+  }
 }
 
 // ---------------- Setup ----------------
@@ -413,6 +455,7 @@ void setup() {
 // ---------------- Loop ----------------
 void loop() {
   server.handleClient();
+  keepWiFi();
   updateAlerts();
   if ((long)(millis() - nextTick) < 0) return;
   nextTick += SAMPLE_MS;
@@ -438,8 +481,9 @@ void loop() {
   }
 
   int hCls = 0, fCls = 0; float hConf = 0, fConf = 0;
-  bool hOk = predict(heat, hCls, hConf);
-  bool fOk = predict(fire, fCls, fConf);
+  float hP[4] = {0}, fP[4] = {0};
+  bool hOk = predict(heat, hCls, hConf, hP);
+  bool fOk = predict(fire, fCls, fConf, fP);
 
   // --- alert state ---
   if (!heat.ok || !fire.ok) {
@@ -452,22 +496,23 @@ void loop() {
   }
 
   // --- build JSON ---
-  char heatJ[80], fireJ[100];
-  if (hOk) snprintf(heatJ, sizeof(heatJ), "{\"percentage\":%d,\"label\":\"%s\"}",
-                    (int)lroundf(hConf * 100), LABELS[hCls]);
+  // "levels" = probability of LOW, MEDIUM, HIGH, CRITICAL (the Pi turns it into a 0..1 hazard score)
+  char heatJ[160], fireJ[160];
+  if (hOk) snprintf(heatJ, sizeof(heatJ), "{\"percentage\":%d,\"label\":\"%s\",\"levels\":[%.3f,%.3f,%.3f,%.3f]}",
+                    (int)lroundf(hConf * 100), LABELS[hCls], hP[0], hP[1], hP[2], hP[3]);
   else     snprintf(heatJ, sizeof(heatJ), "{\"percentage\":null,\"label\":null}");
 
-  if (fOk) snprintf(fireJ, sizeof(fireJ), "{\"percentage\":%d,\"label\":\"%s\"}",
-                    (int)lroundf(fConf * 100), LABELS[fCls]);
+  if (fOk) snprintf(fireJ, sizeof(fireJ), "{\"percentage\":%d,\"label\":\"%s\",\"levels\":[%.3f,%.3f,%.3f,%.3f]}",
+                    (int)lroundf(fConf * 100), LABELS[fCls], fP[0], fP[1], fP[2], fP[3]);
   else     snprintf(fireJ, sizeof(fireJ), "{\"percentage\":null,\"label\":null}");
 
   char sTemp[16], sHum[16];
   num(sTemp, sizeof(sTemp), lastTemp, 0);
   num(sHum,  sizeof(sHum),  lastHum,  0);
 
-  char buf[640];
+  char buf[1024];
   snprintf(buf, sizeof(buf),
-    "{\"nodeId\":\"%s\",\"timestamp\":%lu,\"sensors\":{"
+    "{\"nodeId\":\"%s\",\"timestamp\":%lu,\"rssi\":%d,\"sensors\":{"
       "\"temperature\":{\"value\":%s,\"unit\":\"\\u00b0C\"},"
       "\"humidity\":{\"value\":%s,\"unit\":\"%%\"},"
       "\"smoke\":{\"value\":%d,\"unit\":\"raw_adc\"},"
@@ -475,12 +520,20 @@ void loop() {
       "\"flameDetected\":{\"value\":%d,\"unit\":\"bool\"}},"
     "\"alert\":{\"level\":\"%s\",\"instant\":%s},"
     "\"risk\":{\"fire\":%s,\"heat\":%s}}",
-    NODE_ID, millis() / 1000UL, sTemp, sHum, smokeRaw, flameRaw, flameDet,
+    NODE_ID, millis() / 1000UL, (int)(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0),
+    sTemp, sHum, smokeRaw, flameRaw, flameDet,
     ALERT_NAMES[instantActive ? AL_CRITICAL : alertState], instantActive ? "true" : "false",
     fireJ, heatJ);
 
   snprintf(latestJson, sizeof(latestJson), "%s", buf);   // served to WiFi clients
-  pushToGateway(buf);                                    // send this sample to the ESP8266 gateway
+
+  // send to the Raspberry Pi every POST_MS, and at once when the alert level changes
+  int alertNow = instantActive ? AL_CRITICAL : alertState;
+  if (millis() - lastPost >= POST_MS || alertNow != lastPostedAlert) {
+    lastPost = millis();
+    lastPostedAlert = alertNow;
+    postToPi(buf);
+  }
 #if SERIAL_JSON
   sendLine(buf);
 #endif

@@ -118,15 +118,39 @@ The Pi answers `200` when saved, `400` with `details` listing the reasons when r
 | node_id | string | `NODE_01` or `NODE_02` (others are saved but get no risk score); lower case is upper-cased |
 | water_level, soil_moisture, humidity | number | 0 – 100 |
 | temperature | number | -50 – 60 |
-| tilt | number | -10 – 10 |
+| tilt | number | -90 – 90 |
 | smoke | number | 0 – 1000 |
 | rain, flame | true/false, 1/0 or "true"/"false" | |
 | optional ML extras | number | `rainfall_mm_h`, `tilt_x_deg`, `tilt_y_deg`, `acceleration_g`, `smoke_raw`, `gas_raw`, `signal_strength`, TinyML `node1_*`/`node2_*` scores and labels |
 
 Numbers may be sent as text (`"45.2"`). Keys are snake_case. No timestamp needed — the Pi stamps it.
-The optional extras are stored and passed to the ML model; the more of them a node sends, the more of the model's inputs are real (today only 5 of 12 for NODE_01 and 4 of 9 for NODE_02).
+The optional extras are stored and passed to the ML model; the more of them a node sends, the more of the model's inputs are real (the curl format gives 5 of 12 for NODE_01 and 4 of 9 for NODE_02; your sketches give 7 of 12 without the MPU6050 - 10+ with it - and 8 of 9).
 
-### Firmware
+### Your node sketches (use these)
+| node | folder | needs in the folder |
+|---|---|---|
+| NODE_01 flood + landslide | `firmware/SIH/` | `SIH.ino`, `landslide_model.h`, **`flood_model.h` (add yours - without it flood risk is null)** |
+| NODE_02 wildfire + heat | `firmware/NODE_2/` | `NODE_2.ino`, `heat_model.h`, `flame_model.h` |
+
+Libraries: **Chirale_TensorFlowLite** and **DHT sensor library** (Library Manager). Board: **ESP32S3 Dev Module**.
+
+What they do now:
+- Join the Pi's hotspot `HAZARD-NET` / `hazard1234` and POST their own JSON to `http://192.168.4.1:3000/api/sensor-data` every 5 s
+  (sampling and the on-node TinyML still run every 2 s). NODE_02 also sends at once when its alert level changes (instant flame alert).
+- If the Pi is not up yet they start their own hotspot (`NODE01-JSON` / `NODE02-JSON`) and keep retrying; they switch to the Pi as soon as it appears.
+- Serial (115200) prints `{"event":"pi_post","http":200}` when the Pi saves the packet (`400` = rejected: open `/esp` to see why).
+- The Pi translates their format: `waterLevel`→`water_level`, `rainfall` mm ≥ 2.5 → `rain: true`, smoke ADC 0–4095 → `smoke` 0–1000
+  (+ raw `smoke_raw` for the ML), `flameDetected`/instant alert → `flame`, `tiltX/tiltY` → tilt, and the on-node TinyML result
+  (`risk.*.levels`) → the ML model's TinyML inputs. The node's `timestamp` is its uptime, so the Pi uses its own clock instead.
+
+Changes made to your sketches (the originals are in git history):
+- Wi-Fi → `HAZARD-NET`; NODE_02's ESP8266 gateway is replaced by the Pi (same address 192.168.4.1, port 3000).
+- `SIH.ino`: removed a stray `3` on line 384 that stopped it compiling; `flood_model.h` is optional like `landslide_model.h`;
+  with `USE_ULTRASONIC 1` it now reports water **level** (`SENSOR_HEIGHT_CM` − distance) instead of the distance to the water;
+  adds `rainfall` (mm) next to the raw rain ADC.
+- Both: send `rssi` and the 4 class probabilities (`levels`) of each TinyML model; bigger JSON buffers.
+
+### Generic firmware (no TinyML)
 `firmware/esp32s3_node/esp32s3_node.ino` (Arduino IDE):
 1. Boards Manager → install **esp32 by Espressif**; select **ESP32S3 Dev Module**.
 2. Library Manager → **DHT sensor library** (Adafruit) if `USE_DHT22` is 1. The MPU6050 is read with plain `Wire`, no library.

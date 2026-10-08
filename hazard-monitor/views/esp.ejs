@@ -65,7 +65,9 @@
       <p class="sub">Booleans may be <code>true/false</code> or <code>1/0</code>; numbers may be sent as text. Extra ML
         fields (<code>rainfall_mm_h</code>, <code>tilt_x_deg</code>, <code>tilt_y_deg</code>, <code>acceleration_g</code>,
         <code>gas_raw</code>, TinyML scores) are stored and passed to the ML model. Firmware:
-        <code>firmware/esp32s3_node/esp32s3_node.ino</code>.</p>
+        <code>firmware/SIH/SIH.ino</code> (NODE_01) and <code>firmware/NODE_2/NODE_2.ino</code> (NODE_02). Their own
+        format (<code>{"nodeId":..,"sensors":{"waterLevel":{"value":..}}, "risk":{..}}</code>) is accepted too and
+        shown here translated.</p>
     </div>
   </div>
 
