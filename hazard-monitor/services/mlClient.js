@@ -57,6 +57,8 @@ async function status() {
   try {
     const response = await axios.get(`${ML_URL}/health`, { timeout: 2000 });
     const health = response.data || {};
+    // The service is reachable again: an old "not running" error is stale
+    if (state.lastError === 'ML service is not running') state.lastError = null;
     return {
       working: health.status === 'ok',
       models: health.models || {},

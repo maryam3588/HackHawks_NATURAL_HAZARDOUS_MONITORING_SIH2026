@@ -603,6 +603,21 @@
       color: #c62828;
       font-weight: 700;
     }
+
+    /* ML service offline: keep the last values visible but clearly old */
+    .ml-box.stale {
+      opacity: 0.55;
+      border-style: dashed;
+    }
+
+    /* Risk cards: 4 across on wide screens, 2 on tablets, 1 on phones */
+    @media (max-width: 1000px) {
+      .risk-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 560px) {
+      .risk-summary { grid-template-columns: minmax(0, 1fr); }
+    }
   </style>
 </head>
 
@@ -989,6 +1004,8 @@
           note.textContent = [inputs, time].filter(Boolean).join(' · ');
           note.className = 'ml-note';
         }
+        note.dataset.live = note.textContent;
+        document.getElementById(`${card}-ml`).classList.remove('stale');
       });
     }
 
@@ -997,6 +1014,14 @@
       pill.textContent = working ? 'ML MODEL WORKING' : 'ML MODEL OFFLINE';
       pill.className = working ? 'ml-status working' : 'ml-status';
       pill.title = detail || '';
+      // While ML is offline, mark every shown ML value as an old value
+      Object.values(ML_CARDS).forEach((card) => {
+        const box = document.getElementById(`${card}-ml`);
+        const note = document.getElementById(`${card}-ml-note`);
+        if (!note.dataset.live) return; // nothing shown yet
+        box.classList.toggle('stale', !working);
+        note.textContent = working ? note.dataset.live : `ML offline · last value ${note.dataset.live.split(' · ').pop()}`;
+      });
     }
 
     async function checkMlStatus() {

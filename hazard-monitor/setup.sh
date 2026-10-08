@@ -12,7 +12,9 @@
 #         Pi 4 / 3 / Zero2 -> mongo:4.4.18 (newest build that runs on them)
 #       (skipped if MONGODB_URI in .env points to Atlas / another server)
 #    4. installs the app's npm packages
-#    5. installs a systemd service so the dashboard starts on every boot
+#    5. installs the ML model service (Python, your trained models in ml/)
+#    6. installs systemd services so the ML model and the dashboard start
+#       on every boot and restart by themselves if they crash
 #
 #  Needs internet ONCE (for steps 2-4). After that it runs fully offline.
 # =====================================================================
@@ -20,6 +22,7 @@ set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE=hazard-monitor
+ML_SERVICE=hazard-ml
 MONGO_CONTAINER=hazard-mongo
 MONGO_VOLUME=hazard-mongo-data
 
@@ -59,6 +62,12 @@ PORT="$(grep -E '^PORT=' .env | tail -1 | cut -d= -f2- | tr -d '"'"'"' \r')"
 PORT="${PORT:-3000}"
 MONGODB_URI="$(grep -E '^MONGODB_URI=' .env | tail -1 | cut -d= -f2- | tr -d '"'"'"' \r')"
 MONGODB_URI="${MONGODB_URI:-mongodb://127.0.0.1:27017/environmental-monitoring}"
+# ML settings (added to older .env files that do not have them yet)
+grep -qE '^ML_URL=' .env || printf '\n# ML model service (ml/live_inference.py) on this Pi\nML_URL=http://127.0.0.1:5001\n' >> .env
+grep -qE '^ML_SAMPLE_SECONDS=' .env || printf '# One reading per node every N seconds goes to the ML model (it was trained on 5-minute data)\nML_SAMPLE_SECONDS=300\n' >> .env
+ML_URL="$(grep -E '^ML_URL=' .env | tail -1 | cut -d= -f2- | tr -d '"'"'"' \r')"
+ML_PORT="${ML_URL##*:}"; ML_PORT="${ML_PORT%%/*}"
+case "$ML_PORT" in ''|*[!0-9]*) ML_PORT=5001 ;; esac
 case "$MONGODB_URI" in
   *127.0.0.1*|*localhost*) LOCAL_DB=1 ;;
   *) LOCAL_DB=0 ;;
@@ -66,7 +75,7 @@ esac
 
 say "Installing base packages"
 $SUDO apt-get update -y
-$SUDO apt-get install -y ca-certificates curl gnupg
+$SUDO apt-get install -y ca-certificates curl gnupg python3 python3-venv python3-pip
 
 # ---------------------------------------------------------------- 2. Node.js
 node_ok() {
@@ -153,15 +162,65 @@ if [ "$DB_UP" != "1" ]; then
 fi
 ok "MongoDB is up"
 
-# ---------------------------------------------------------------- 5. systemd service
+# ---------------------------------------------------------------- 5. ML model service
+say "Setting up the ML model (Python)"
+[ -f ml/output/models/model_registry.json ] || die "ml/output/models/ is missing - unzip your pi_models.zip inside ml/ first."
+ML_REQ=ml/output/requirements-pi.txt
+[ -f "$ML_REQ" ] || die "$ML_REQ is missing - it comes with pi_models.zip from Colab."
+[ -x ml/.venv/bin/python ] || run_as_app_user python3 -m venv ml/.venv
+run_as_app_user ml/.venv/bin/pip install --upgrade pip --quiet
+if ! run_as_app_user ml/.venv/bin/pip install -r "$ML_REQ"; then
+  die "Could not install the ML libraries in $ML_REQ (see above).
+    The models need exactly that scikit-learn version. Send me the error."
+fi
+ok "ML libraries: $(run_as_app_user ml/.venv/bin/python -c 'import sklearn; print("scikit-learn", sklearn.__version__)')"
+if ! (cd ml && run_as_app_user .venv/bin/python live_inference.py stdin < sample_readings.jsonl > /dev/null); then
+  die "The ML model failed its self-test (see above)."
+fi
+ok "ML models load and predict"
+
+$SUDO tee /etc/systemd/system/$ML_SERVICE.service >/dev/null <<UNIT
+[Unit]
+Description=HackHawks Hazard ML model (flood, landslide, wildfire, extreme heat)
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=$APP_USER
+WorkingDirectory=$APP_DIR/ml
+Environment=OMP_NUM_THREADS=1
+ExecStart=$APP_DIR/ml/.venv/bin/python live_inference.py serve --host 127.0.0.1 --port $ML_PORT
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable $ML_SERVICE >/dev/null 2>&1
+$SUDO systemctl restart $ML_SERVICE
+
+ML_UP=0
+for _ in $(seq 1 30); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:$ML_PORT/health"; then ML_UP=1; break; fi
+  sleep 1
+done
+if [ "$ML_UP" != "1" ]; then
+  $SUDO journalctl -u $ML_SERVICE -n 30 --no-pager || true
+  die "ML model service didn't come up (logs above)."
+fi
+ok "ML model service running on 127.0.0.1:$ML_PORT"
+
+# ---------------------------------------------------------------- 6. dashboard service
 say "Installing auto-start service"
-UNIT_AFTER="network-online.target"
-[ "$LOCAL_DB" = "1" ] && UNIT_AFTER="network-online.target docker.service"
+UNIT_AFTER="network-online.target $ML_SERVICE.service"
+[ "$LOCAL_DB" = "1" ] && UNIT_AFTER="network-online.target docker.service $ML_SERVICE.service"
 $SUDO tee /etc/systemd/system/$SERVICE.service >/dev/null <<EOF
 [Unit]
 Description=HackHawks Hazard Monitoring Dashboard
 After=$UNIT_AFTER
-Wants=network-online.target
+Wants=network-online.target $ML_SERVICE.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -200,4 +259,6 @@ printf '     http://%s.local:%s\n\n' "$(hostname)" "$PORT"
 printf '  ESP32 nodes POST JSON to:\n'
 printf '     http://%s:%s/api/sensor-data\n\n' "${IP:-<pi-ip>}" "$PORT"
 printf '  Logs:     journalctl -u %s -f\n' "$SERVICE"
-printf '  Restart:  sudo systemctl restart %s\n\n' "$SERVICE"
+printf '  Restart:  sudo systemctl restart %s\n' "$SERVICE"
+printf '  ML model: sudo systemctl status %s   (logs: journalctl -u %s -f)\n\n' "$ML_SERVICE" "$ML_SERVICE"
+printf '  The dashboard header shows "ML MODEL WORKING" when the model is connected.\n\n'
